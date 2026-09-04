@@ -108,12 +108,21 @@ def _tight_crop_filtergraph(ass_path: str, fonts_dir: str, wm_font: str) -> str:
 
 
 def _split_screen_filtergraph(ass_path: str, fonts_dir: str, wm_font: str) -> str:
-    """Source panel + gameplay panel per CLAUDE.md. Gameplay audio discarded."""
+    """Source panel + gameplay panel per CLAUDE.md. Gameplay audio discarded.
+
+    The gameplay chain scales to *cover* the 1080x864 panel and then
+    center-crops, so footage of any aspect fills the panel exactly: a plain
+    `scale=-2:864` only reaches 1080 wide when the source is at least 5:4, and
+    anything narrower (16:9, or a vertical 9:16 meme) would come up short and
+    leave the panel unfilled. `setsar=1` keeps non-square-pixel sources from
+    rendering stretched.
+    """
     tail = _caption_and_watermark_tail("comp", ass_path, fonts_dir, wm_font)
     return (
         "color=c=black:s=1080x1920:r=30[base];"
         "[0:v]scale=1080:-2[src];"
-        "[1:v]scale=-2:864,crop=1080:864[game];"
+        "[1:v]scale=1080:864:force_original_aspect_ratio=increase,"
+        "crop=1080:864,setsar=1[game];"
         "[base][src]overlay=0:250[t1];"
         "[t1][game]overlay=0:1056[comp];"
         f"{tail};"

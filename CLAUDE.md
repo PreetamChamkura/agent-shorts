@@ -178,12 +178,17 @@ Break phrase groups on sentence-ending punctuation from the transcript even when
 ```
 color=c=black:s=1080x1920:r=30[base];
 [0:v]scale=1080:-2[src];
-[1:v]scale=-2:864,crop=1080:864[game];
+[1:v]scale=1080:864:force_original_aspect_ratio=increase,
+    crop=1080:864,setsar=1[game];
 [base][src]overlay=0:250[t1];
 [t1][game]overlay=0:1056[comp]
 ```
 
 16:9 at 1080 wide is 607 tall, occupying y 250-857. Gameplay 1056-1920.
+
+Gameplay scales to cover the 1080x864 panel, then center-crops. A plain
+`scale=-2:864` only reaches 1080 wide at 5:4 or wider — 16:9 and vertical
+footage would land short and leave the panel unfilled.
 
 ### Tail, both compositions
 
