@@ -27,9 +27,9 @@ class Word(TypedDict):
     end: float
 
 
-# Milestone-1 hardcoded style: white heavy text, yellow highlight. Milestone 2
-# replaces this dict with per-tone blocks loaded from styles.yaml. Every field
-# defaults to the spec's "Pop" Style line so an empty override reproduces it.
+# House baseline ("Pop" style from CLAUDE.md). Every tone in styles.yaml only
+# states its deltas from this dict; clipper.styles.style_for_tone supplies the
+# override, build_ass merges it in. An empty override reproduces this exactly.
 DEFAULT_STYLE: dict[str, object] = {
     "name": "Pop",
     "fontname": "Montserrat ExtraBold",

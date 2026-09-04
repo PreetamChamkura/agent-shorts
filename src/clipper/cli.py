@@ -1,13 +1,17 @@
 """Command-line entry point.
 
 Wires stages together; each stage lives in its own module and no stage imports
-another. Milestone 1 exposes two subcommands:
+another. Stage 3 (LLM selection) doesn't exist yet, so --start/--end/--tone
+are passed manually. Two subcommands:
 
-  clipper clip URL --start S --end E [--n N] [--force]
+  clipper clip URL --start S --end E --tone T [--n N] [--composition C] [--force]
       ingest -> transcribe -> render (skips stage 3 selection).
 
-  clipper render VIDEO_ID --start S --end E [--n N] [--force]
+  clipper render VIDEO_ID --start S --end E --tone T [--n N] [--composition C] [--force]
       render only. Never re-downloads or re-transcribes (caching is stage-local).
+
+--tone accepts any string; an unknown tone fails loudly inside render() (see
+clipper.styles) rather than being validated — and silently drifting — here.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import sys
 def _add_clip_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--start", type=float, required=True, help="clip start, seconds")
     p.add_argument("--end", type=float, required=True, help="clip end, seconds")
+    p.add_argument("--tone", required=True, help="tone key from styles.yaml, e.g. 'confident'")
     p.add_argument("--n", type=int, default=0, help="clip index within the video")
     p.add_argument(
         "--composition",
@@ -54,7 +59,13 @@ def main(argv: list[str] | None = None) -> None:
         video_id = ingest(args.url, force=args.force)
         transcribe(video_id, force=args.force)
         out = render(
-            video_id, args.n, args.start, args.end, composition=args.composition, force=args.force
+            video_id,
+            args.n,
+            args.start,
+            args.end,
+            args.tone,
+            composition=args.composition,
+            force=args.force,
         )
         print(out)
     elif args.command == "render":
@@ -65,6 +76,7 @@ def main(argv: list[str] | None = None) -> None:
             args.n,
             args.start,
             args.end,
+            args.tone,
             composition=args.composition,
             force=args.force,
         )

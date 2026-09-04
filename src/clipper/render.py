@@ -3,13 +3,15 @@
 Reads: work/{video_id}/source.mp4, work/{video_id}/words.json
 Writes: work/{video_id}/caps_{n}.ass, work/{video_id}/out_{n}.mp4
 
-Three compositions: `tight_crop` (milestone 1 baseline — blur-fill with the
-subject scaled up and center-cropped to fill more vertical space), `blur_fill`
-(no crop, more dead space), and `split_screen` (source panel + gameplay panel
-per CLAUDE.md — reserved as a tone-gated option for low-motion segments once
-tone routing lands, not a default). No VO, one hardcoded style. Every
-ffmpeg/ffprobe call goes through run_ffmpeg/run_ffprobe. Re-running never
-touches stage 1 or 2.
+Three compositions: `tight_crop` (baseline — blur-fill with the subject scaled
+up and center-cropped to fill more vertical space), `blur_fill` (no crop, more
+dead space), and `split_screen` (source panel + gameplay panel per CLAUDE.md —
+available but not tone-wired yet; picking it for "low-motion segments" needs a
+motion signal this pipeline doesn't compute, so it stays a manual --composition
+choice until that lands). No VO. Caption style is a lookup on `tone` via
+clipper.styles.style_for_tone — CLAUDE.md's Tone routing table, never random,
+never a silent default for an unknown tone. Every ffmpeg/ffprobe call goes
+through run_ffmpeg/run_ffprobe. Re-running never touches stage 1 or 2.
 """
 
 from __future__ import annotations
@@ -18,9 +20,10 @@ import hashlib
 import json
 import logging
 
-from .ass import DEFAULT_STYLE, Word, build_ass
+from .ass import Word, build_ass
 from .ffmpeg import run_ffmpeg, run_ffprobe
 from .paths import CAPTION_FONT, GAMEPLAY_DIR, WATERMARK_FONT, work_dir
+from .styles import style_for_tone
 
 log = logging.getLogger("clipper.render")
 
@@ -28,8 +31,6 @@ log = logging.getLogger("clipper.render")
 MIN_DURATION = 18.0
 MAX_DURATION = 58.0
 
-# Milestone-1 hardcoded style.
-GROUP_SIZE = 3
 WATERMARK_HANDLE = "@HANDLE"
 WATERMARK_Y = 1400  # below the caption band, still inside the y 250-1520 safe zone
 
@@ -197,14 +198,18 @@ def render(
     n: int,
     start: float,
     end: float,
+    tone: str,
     *,
     composition: str = "tight_crop",
     force: bool = False,
 ) -> str:
     """Render clip ``n`` of ``video_id`` between ``start`` and ``end`` seconds.
 
-    ``composition`` selects the filter graph: tight_crop (default baseline),
-    blur_fill, or split_screen. Returns the path to out_{n}.mp4.
+    ``tone`` is a required lookup into styles.yaml (clipper.styles) — no
+    default, since a missing tone must fail loudly rather than silently
+    reusing whatever style happened to run last. ``composition`` selects the
+    filter graph: tight_crop (default baseline), blur_fill, or split_screen.
+    Returns the path to out_{n}.mp4.
     """
     if composition not in COMPOSITIONS:
         raise ValueError(
@@ -217,6 +222,10 @@ def render(
             f"render: clip duration {duration:.1f}s outside {MIN_DURATION}-{MAX_DURATION}s "
             f"(start={start}, end={end})"
         )
+
+    # Validated before the cache check so a bad tone fails loudly every time,
+    # never silently masked by reusing a stale render from a prior tone.
+    style_overrides, group_size = style_for_tone(tone)
 
     _check_fonts()
 
@@ -237,9 +246,15 @@ def render(
 
     words = json.loads(words_path.read_text())["words"]
     clip_words = _clip_words(words, start, end)
-    ass_text = build_ass(clip_words, GROUP_SIZE, DEFAULT_STYLE)
+    ass_text = build_ass(clip_words, group_size, style_overrides)
     ass_path.write_text(ass_text)
-    log.info("render: wrote %s (%d caption words)", ass_path, len(clip_words))
+    log.info(
+        "render: wrote %s (%d caption words, tone=%s, group_size=%d)",
+        ass_path,
+        len(clip_words),
+        tone,
+        group_size,
+    )
 
     fonts_dir = str(CAPTION_FONT.parent)
     wm_font = str(WATERMARK_FONT)

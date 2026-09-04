@@ -1,0 +1,41 @@
+# Tone -> caption style, per CLAUDE.md's "Tone routing" section.
+#
+# One block per tone. Adding a tone means adding a block here — never touch
+# the renderer. A block only needs to state what differs from the house
+# baseline (clipper.ass.DEFAULT_STYLE, the "Pop" style); `group_size` is the
+# one field every block must set since there's no house default for it.
+#
+# Fields, when present, override DEFAULT_STYLE 1:1: primary, highlight,
+# alignment, marginv, marginl, marginr, outline, shadow, bold, uppercase.
+# `highlight` recolors the active word (default house yellow); `primary`
+# recolors the whole phrase (default house white). Colors are &HAABBGGRR.
+#
+# If a tone is looked up here and missing, that's a hard failure by design
+# (clipper.styles.style_for_tone) — drift between the selection prompt and
+# this file must surface immediately, never fall back to a default.
+
+burn: # someone gets got
+  group_size: 3
+  highlight: "&H003B3BE2" # burn red
+
+chaotic: # everyone talking, nothing lands
+  group_size: 2
+  alignment: 8 # top-center: "high position"
+  marginv: 260 # just below the y=250 safe-zone header
+
+wholesome: # genuine or sincere moment
+  group_size: 4
+  primary: "&H00D0FDFF" # soft cream
+
+awkward: # silence, someone caught out
+  group_size: 5
+  primary: "&H00FFFFFF" # white — explicit, no color pop; matches the "slow", understated read
+
+revealing: # information the audience lacked
+  group_size: 3
+  highlight: "&H00279FEF" # amber
+
+confident: # a claim, prediction, flat statement
+  group_size: 3
+  primary: "&H00FFFFFF" # white
+  outline: 11 # heavier stroke than the house 9, for "white heavy"
