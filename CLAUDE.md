@@ -20,7 +20,7 @@ Platform UI overlays the frame. Nothing load-bearing outside these bounds:
 - Horizontal: x 0-900. Right 180px is like/comment/share/remix.
 - Vertical: y 250-1520. Top is channel header, bottom is title, subscribe button, and scrubber.
 - Panel seam (split composition) sits at y≈960.
-- Watermark at y=1000, centered.
+- Watermark at y=1400, centered.
 
 ## Stage contract
 
@@ -190,7 +190,7 @@ color=c=black:s=1080x1920:r=30[base];
 ```
 [comp]ass=work/{id}/caps_{n}.ass:fontsdir=./fonts[capped];
 [capped]drawtext=fontfile=./fonts/Montserrat-Bold.ttf:text='@HANDLE':
-  fontcolor=white@0.45:fontsize=40:x=(w-tw)/2:y=1000[vout]
+  fontcolor=white@0.45:fontsize=40:x=(w-tw)/2:y=1400[vout]
 ```
 
 Gameplay audio is always discarded. Gameplay video comes from `assets/gameplay/*.mp4` at a random offset seeded by `{video_id}:{n}` so renders are reproducible and consecutive uploads differ.
@@ -208,6 +208,25 @@ Gameplay audio is always discarded. Gameplay video comes from `assets/gameplay/*
 Do not build: publishing/upload code, scheduling, analytics ingestion, automated compilations, face tracking, or a hosted web app. Ask first.
 
 Automated compilations specifically are off the table — they're the most-cited example of reused content and a compilation of reuploads is the worst possible artifact to hand a policy reviewer.
+
+## Model switching
+
+Default model for this project is Sonnet 5. Two situations call for Opus 5
+instead, and in both cases: stop, tell me explicitly to run
+`/model claude-opus-5`, wait for my confirmation before continuing, and tell
+me to switch back to `/model claude-sonnet-5` once that specific task is done.
+
+Switch for:
+- Designing or revising the stage 3 selection prompt (prompts/select.md) —
+  segment-selection quality and the `why`-field validation logic benefit
+  more from stronger reasoning than routine coding does
+- Debugging that has failed on 2+ attempts under Sonnet — a gnarly ffmpeg
+  filter-graph bug, an audio-sync issue, anything where the first couple of
+  fixes didn't hold
+
+Don't switch for routine work: stage scaffolding, file I/O, subprocess
+wrappers, config, tests, straightforward bug fixes. That's the majority of
+this codebase and Sonnet handles it well.
 
 ## Conventions
 

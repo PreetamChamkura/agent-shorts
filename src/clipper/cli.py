@@ -21,6 +21,12 @@ def _add_clip_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--start", type=float, required=True, help="clip start, seconds")
     p.add_argument("--end", type=float, required=True, help="clip end, seconds")
     p.add_argument("--n", type=int, default=0, help="clip index within the video")
+    p.add_argument(
+        "--composition",
+        choices=["blur_fill", "tight_crop", "split_screen"],
+        default="blur_fill",
+        help="filter graph to render with (default: blur_fill)",
+    )
     p.add_argument("--force", action="store_true", help="ignore cached outputs for this stage")
 
 
@@ -47,12 +53,21 @@ def main(argv: list[str] | None = None) -> None:
 
         video_id = ingest(args.url, force=args.force)
         transcribe(video_id, force=args.force)
-        out = render(video_id, args.n, args.start, args.end, force=args.force)
+        out = render(
+            video_id, args.n, args.start, args.end, composition=args.composition, force=args.force
+        )
         print(out)
     elif args.command == "render":
         from .render import render
 
-        out = render(args.video_id, args.n, args.start, args.end, force=args.force)
+        out = render(
+            args.video_id,
+            args.n,
+            args.start,
+            args.end,
+            composition=args.composition,
+            force=args.force,
+        )
         print(out)
     else:  # argparse enforces required=True, but be explicit rather than silent.
         parser.error(f"unknown command {args.command!r}")
