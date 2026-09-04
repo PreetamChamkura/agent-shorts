@@ -18,6 +18,10 @@ GAMEPLAY_DIR = ASSETS_DIR / "gameplay"
 PROMPTS_DIR = REPO_ROOT / "prompts"
 STYLES_PATH = REPO_ROOT / "styles.yaml"
 
+# Content-addressed TTS cache, keyed by sha256 of the script text. Shared
+# across every video_id — CLAUDE.md: "never pay twice for the same line."
+TTS_CACHE_DIR = WORK_DIR / "_tts_cache"
+
 # Fonts vendored per CLAUDE.md. Milestone 1 needs exactly these two.
 CAPTION_FONT = FONTS_DIR / "Montserrat-ExtraBold.ttf"  # ASS "Montserrat ExtraBold"
 WATERMARK_FONT = FONTS_DIR / "Montserrat-Bold.ttf"  # drawtext tail

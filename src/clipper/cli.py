@@ -1,23 +1,30 @@
 """Command-line entry point.
 
 Wires stages together; each stage lives in its own module and no stage imports
-another. Three subcommands:
+another. Subcommands:
 
   clipper select VIDEO_ID [--force]
       stage 3 only. Calls the LLM once per transcript window, writes
       segments.json. Cached — never re-called unless --force.
 
+  clipper narrate VIDEO_ID [--force]
+      stage 3.5 only. Synthesizes vo_{n}.wav for every non-null vo_script in
+      segments.json. Cached two ways — see clipper.narrate.
+
   clipper render VIDEO_ID [--n N] [--composition C] [--force]
                           [--start S --end E --tone T]
       stage 4 only. With no --start/--end/--tone, reads segment --n from
-      segments.json. Never re-downloads, re-transcribes, or re-calls the LLM.
+      segments.json (including its VO window, if vo_{n}.wav exists). Never
+      re-downloads, re-transcribes, or re-calls the LLM.
 
   clipper clip URL [...same clip args...]
-      ingest -> transcribe -> (select, if no manual args) -> render.
+      ingest -> transcribe -> (select + narrate, if no manual args) -> render.
 
 --start/--end/--tone are given together or not at all; a partial set is an
-error rather than a half-manual guess. --tone accepts any string, and an
-unknown tone fails loudly inside render() (see clipper.styles).
+error rather than a half-manual guess. Manual mode never mixes in VO (there is
+no punchline_at to place it against) — that's the segments.json path only.
+--tone accepts any string, and an unknown tone fails loudly inside render()
+(see clipper.styles).
 """
 
 from __future__ import annotations
@@ -55,7 +62,7 @@ def _manual_spec(args) -> bool:
     return False
 
 
-def _spec_from_segments(video_id: str, n: int) -> tuple[float, float, str]:
+def _segment_from_file(video_id: str, n: int) -> dict:
     from .paths import work_dir
 
     seg_path = work_dir(video_id) / "segments.json"
@@ -70,7 +77,18 @@ def _spec_from_segments(video_id: str, n: int) -> tuple[float, float, str]:
         raise SystemExit(
             f"clipper: no segment n={n} in {seg_path} ({len(segments)} segment(s) available)."
         )
-    return float(match["start"]), float(match["end"]), str(match["tone"])
+    return match
+
+
+def _vo_kwargs(seg: dict) -> dict:
+    """{"punchline_at", "vo_placement"} when the segment has usable VO, else {}.
+
+    A null vo_script or a stage-3.5 tts_failed flag both mean the normal no-VO
+    path — render() itself also checks that vo_{n}.wav exists before mixing.
+    """
+    if seg.get("vo_script") is None or seg.get("tts_failed"):
+        return {}
+    return {"punchline_at": float(seg["punchline_at"]), "vo_placement": str(seg["vo_placement"])}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -83,7 +101,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="clipper")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    clip_p = sub.add_parser("clip", help="ingest + transcribe + select + render")
+    clip_p = sub.add_parser("clip", help="ingest + transcribe + select + narrate + render")
     clip_p.add_argument("url", help="YouTube URL")
     _add_clip_args(clip_p)
 
@@ -94,6 +112,12 @@ def main(argv: list[str] | None = None) -> None:
     select_p = sub.add_parser("select", help="stage 3 only: LLM segment selection")
     select_p.add_argument("video_id", help="video id of an already-transcribed video")
     select_p.add_argument("--force", action="store_true", help="re-call the LLM, ignoring cache")
+
+    narrate_p = sub.add_parser("narrate", help="stage 3.5 only: synthesize VO for segments.json")
+    narrate_p.add_argument("video_id", help="video id of an already-selected video")
+    narrate_p.add_argument(
+        "--force", action="store_true", help="re-copy vo_{n}.wav (never re-pays for cached text)"
+    )
 
     args = parser.parse_args(argv)
 
@@ -110,6 +134,19 @@ def main(argv: list[str] | None = None) -> None:
             )
         print(f"\n{len(out['segments'])} segment(s)")
 
+    elif args.command == "narrate":
+        from .narrate import narrate
+
+        out = narrate(args.video_id, force=args.force)
+        for seg in out["segments"]:
+            if seg.get("vo_script") is None:
+                status = "(no VO)"
+            elif seg.get("tts_failed"):
+                status = "TTS FAILED — rendering without VO"
+            else:
+                status = f"vo_{seg['n']}.wav"
+            print(f"[{seg['n']}] {status}")
+
     elif args.command == "clip":
         from .ingest import ingest
         from .render import render
@@ -120,12 +157,16 @@ def main(argv: list[str] | None = None) -> None:
         transcribe(video_id, force=args.force)
 
         if manual:
-            start, end, tone = args.start, args.end, args.tone
+            start, end, tone, vo_kwargs = args.start, args.end, args.tone, {}
         else:
+            from .narrate import narrate
             from .select import select
 
             select(video_id, force=args.force)
-            start, end, tone = _spec_from_segments(video_id, args.n)
+            narrate(video_id, force=args.force)
+            seg = _segment_from_file(video_id, args.n)
+            start, end, tone = float(seg["start"]), float(seg["end"]), str(seg["tone"])
+            vo_kwargs = _vo_kwargs(seg)
 
         out = render(
             video_id,
@@ -135,6 +176,7 @@ def main(argv: list[str] | None = None) -> None:
             tone,
             composition=args.composition,
             force=args.force,
+            **vo_kwargs,
         )
         print(out)
 
@@ -142,9 +184,11 @@ def main(argv: list[str] | None = None) -> None:
         from .render import render
 
         if _manual_spec(args):
-            start, end, tone = args.start, args.end, args.tone
+            start, end, tone, vo_kwargs = args.start, args.end, args.tone, {}
         else:
-            start, end, tone = _spec_from_segments(args.video_id, args.n)
+            seg = _segment_from_file(args.video_id, args.n)
+            start, end, tone = float(seg["start"]), float(seg["end"]), str(seg["tone"])
+            vo_kwargs = _vo_kwargs(seg)
 
         out = render(
             args.video_id,
@@ -154,6 +198,7 @@ def main(argv: list[str] | None = None) -> None:
             tone,
             composition=args.composition,
             force=args.force,
+            **vo_kwargs,
         )
         print(out)
 
