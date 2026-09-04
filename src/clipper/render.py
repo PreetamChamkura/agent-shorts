@@ -76,9 +76,12 @@ def _validate_output(out_path: str) -> None:
     """
     proc = run_ffprobe(
         [
-            "-v", "error",
-            "-show_entries", "stream=codec_type,width,height,r_frame_rate:format=duration",
-            "-of", "json",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,width,height,r_frame_rate:format=duration",
+            "-of",
+            "json",
             out_path,
         ]
     )
@@ -104,8 +107,7 @@ def _validate_output(out_path: str) -> None:
     duration = float(data.get("format", {}).get("duration", 0.0))
     if not (MIN_DURATION <= duration <= MAX_DURATION):
         raise ValueError(
-            f"validate: {out_path} duration {duration:.1f}s outside "
-            f"{MIN_DURATION}-{MAX_DURATION}s"
+            f"validate: {out_path} duration {duration:.1f}s outside {MIN_DURATION}-{MAX_DURATION}s"
         )
     log.info("validate: %s OK (1080x1920, %.2ffps, %.1fs, audio present)", out_path, fps, duration)
 
@@ -149,20 +151,34 @@ def render(video_id: str, n: int, start: float, end: float, *, force: bool = Fal
     run_ffmpeg(
         [
             "-y",
-            "-ss", f"{start}",
-            "-i", str(source),
-            "-t", f"{duration}",
-            "-filter_complex", fc,
-            "-map", "[vout]",
-            "-map", "[aout]",
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-r", "30",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
+            "-ss",
+            f"{start}",
+            "-i",
+            str(source),
+            "-t",
+            f"{duration}",
+            "-filter_complex",
+            fc,
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            "30",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
             str(out_path),
         ]
     )

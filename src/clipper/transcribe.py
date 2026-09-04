@@ -27,9 +27,7 @@ def transcribe(video_id: str, *, force: bool = False) -> dict:
     words_path = wd / "words.json"
 
     if not source.exists():
-        raise FileNotFoundError(
-            f"transcribe: {source} missing — run stage 1 (ingest) first."
-        )
+        raise FileNotFoundError(f"transcribe: {source} missing — run stage 1 (ingest) first.")
 
     if words_path.exists() and not force:
         log.info("transcribe: cache hit for %s (%s), skipping whisper", video_id, words_path)

@@ -9,6 +9,7 @@ enough stderr to see what happened.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -53,8 +54,17 @@ def run_ffmpeg(args: Sequence[str], *, binary: str = "ffmpeg") -> subprocess.Com
     :class:`FFmpegError` carrying the last ``STDERR_TAIL_LINES`` lines of stderr.
     Never swallows failures and never falls back to a default — a broken render
     must surface loudly.
+
+    The binary is resolved via ``CLIPPER_FFMPEG_BIN`` / ``CLIPPER_FFPROBE_BIN``
+    if set (an explicit path pin), else looked up on PATH. The pin matters on
+    machines with more than one ffmpeg where the PATH-first one may lack the
+    ``ass``/``drawtext`` filters this pipeline requires.
     """
-    resolved = shutil.which(binary)
+    env_override = {
+        "ffmpeg": os.environ.get("CLIPPER_FFMPEG_BIN"),
+        "ffprobe": os.environ.get("CLIPPER_FFPROBE_BIN"),
+    }.get(binary)
+    resolved = env_override or shutil.which(binary)
     if resolved is None:
         raise FFmpegError(
             [binary, *args],

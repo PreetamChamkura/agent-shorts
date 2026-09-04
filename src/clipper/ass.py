@@ -103,15 +103,16 @@ def _dialogue_text(group: list[Word], active: int, highlight: str, uppercase: bo
             # Recolour + scale 118->100 over 90ms, then {\r} back to style default
             # so the following words render plain.
             parts.append(
-                f"{{\\c{highlight}&\\fscx118\\fscy118\\t(0,90,\\fscx100\\fscy100)}}"
-                f"{token}{{\\r}}"
+                f"{{\\c{highlight}&\\fscx118\\fscy118\\t(0,90,\\fscx100\\fscy100)}}{token}{{\\r}}"
             )
         else:
             parts.append(token)
     return " ".join(parts)
 
 
-def build_ass(words: Sequence[Word], group_size: int, style: dict[str, object] | None = None) -> str:
+def build_ass(
+    words: Sequence[Word], group_size: int, style: dict[str, object] | None = None
+) -> str:
     """Return the full ASS file contents for ``words``.
 
     Pure: same inputs always yield the same string. ``words`` carry

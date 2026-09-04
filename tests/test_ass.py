@@ -17,7 +17,9 @@ def test_format_ass_time_clamps_negative():
 
 
 def test_group_words_by_size():
-    words = [{"word": w, "start": i, "end": i + 0.5} for i, w in enumerate("a b c d e".split())]
+    words = [
+        {"word": w, "start": i, "end": i + 0.5} for i, w in enumerate(["a", "b", "c", "d", "e"])
+    ]
     groups = group_words(words, 3)
     assert [len(g) for g in groups] == [3, 2]
 
