@@ -1,0 +1,27 @@
+# Pipeline working directory and large binary inputs — never committed.
+# Order matters: ignore contents with dir/*, but re-include each dir (so git
+# descends) and its .gitkeep so the empty structure stays tracked.
+.env
+*.mp4
+
+work/*
+!work/.gitkeep
+
+assets/*
+!assets/.gitkeep
+!assets/gameplay/
+assets/gameplay/*
+!assets/gameplay/.gitkeep
+
+# Fonts are vendored, but keep the dir tracked via .gitkeep only.
+# (fonts/*.ttf are intentionally NOT ignored — vendor them in.)
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
