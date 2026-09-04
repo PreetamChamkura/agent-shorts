@@ -23,9 +23,9 @@ def _add_clip_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--n", type=int, default=0, help="clip index within the video")
     p.add_argument(
         "--composition",
-        choices=["blur_fill", "tight_crop", "split_screen"],
-        default="blur_fill",
-        help="filter graph to render with (default: blur_fill)",
+        choices=["tight_crop", "blur_fill", "split_screen"],
+        default="tight_crop",
+        help="filter graph to render with (default: tight_crop)",
     )
     p.add_argument("--force", action="store_true", help="ignore cached outputs for this stage")
 

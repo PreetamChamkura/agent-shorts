@@ -3,11 +3,13 @@
 Reads: work/{video_id}/source.mp4, work/{video_id}/words.json
 Writes: work/{video_id}/caps_{n}.ass, work/{video_id}/out_{n}.mp4
 
-Three compositions: `blur_fill` (milestone 1 default), `tight_crop` (blur-fill
-with the subject scaled up and center-cropped to fill more vertical space),
-and `split_screen` (source panel + gameplay panel per CLAUDE.md). No VO, one
-hardcoded style. Every ffmpeg/ffprobe call goes through run_ffmpeg/run_ffprobe.
-Re-running never touches stage 1 or 2.
+Three compositions: `tight_crop` (milestone 1 baseline — blur-fill with the
+subject scaled up and center-cropped to fill more vertical space), `blur_fill`
+(no crop, more dead space), and `split_screen` (source panel + gameplay panel
+per CLAUDE.md — reserved as a tone-gated option for low-motion segments once
+tone routing lands, not a default). No VO, one hardcoded style. Every
+ffmpeg/ffprobe call goes through run_ffmpeg/run_ffprobe. Re-running never
+touches stage 1 or 2.
 """
 
 from __future__ import annotations
@@ -196,13 +198,13 @@ def render(
     start: float,
     end: float,
     *,
-    composition: str = "blur_fill",
+    composition: str = "tight_crop",
     force: bool = False,
 ) -> str:
     """Render clip ``n`` of ``video_id`` between ``start`` and ``end`` seconds.
 
-    ``composition`` selects the filter graph: blur_fill, tight_crop, or
-    split_screen. Returns the path to out_{n}.mp4.
+    ``composition`` selects the filter graph: tight_crop (default baseline),
+    blur_fill, or split_screen. Returns the path to out_{n}.mp4.
     """
     if composition not in COMPOSITIONS:
         raise ValueError(
