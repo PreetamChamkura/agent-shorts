@@ -25,6 +25,10 @@ another. Subcommands:
       listing every rendered out_{n}.mp4 with its metadata, an editorial
       checklist, and approve/reject. Writes review.json. Runs until Ctrl+C.
 
+  clipper fetch-gameplay [--limit N]
+      setup tool, not a stage. Downloads filler footage into assets/gameplay/
+      from the Pexels and Pixabay video APIs and writes sources.json.
+
 --start/--end/--tone are given together or not at all; a partial set is an
 error rather than a half-manual guess. Manual mode never mixes in VO (there is
 no punchline_at to place it against) — that's the segments.json path only.
@@ -128,6 +132,11 @@ def main(argv: list[str] | None = None) -> None:
     review_p.add_argument("video_id", help="video id with at least one rendered out_{n}.mp4")
     review_p.add_argument("--port", type=int, default=8765, help="local server port (default 8765)")
 
+    fetch_p = sub.add_parser(
+        "fetch-gameplay", help="setup tool: download filler footage into assets/gameplay/"
+    )
+    fetch_p.add_argument("--limit", type=int, default=12, help="max clips to download (default 12)")
+
     args = parser.parse_args(argv)
 
     if args.command == "select":
@@ -215,6 +224,17 @@ def main(argv: list[str] | None = None) -> None:
         from .review import review
 
         review(args.video_id, port=args.port)
+
+    elif args.command == "fetch-gameplay":
+        from .fetch_gameplay import fetch_gameplay
+
+        manifest = fetch_gameplay(limit=args.limit)
+        for clip in manifest["clips"]:
+            print(
+                f"{clip['file']:<28} {clip['duration']:>5.0f}s  {clip['resolution']:<10} "
+                f"{clip['platform']}  {clip['source_url']}"
+            )
+        print(f"\n{len(manifest['clips'])} clip(s) — screen thumbnails before use")
 
     else:  # argparse enforces required=True, but be explicit rather than silent.
         parser.error(f"unknown command {args.command!r}")

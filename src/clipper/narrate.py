@@ -35,7 +35,7 @@ log = logging.getLogger("clipper.narrate")
 
 TTS_URL = "https://api.openai.com/v1/audio/speech"
 NARRATOR_MODEL = "tts-1-hd"
-NARRATOR_VOICE = "onyx"  # dry, lower register — never randomize (CLAUDE.md)
+NARRATOR_VOICE = "echo"  # picked by ear from an onyx/echo/fable audition — never randomize
 RESPONSE_FORMAT = "wav"
 TIMEOUT = 60.0
 
