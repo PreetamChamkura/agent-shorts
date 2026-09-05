@@ -20,6 +20,11 @@ another. Subcommands:
   clipper clip URL [...same clip args...]
       ingest -> transcribe -> (select + narrate, if no manual args) -> render.
 
+  clipper review VIDEO_ID [--port N]
+      stage 5 only. Starts a local review server (http://127.0.0.1:PORT/)
+      listing every rendered out_{n}.mp4 with its metadata, an editorial
+      checklist, and approve/reject. Writes review.json. Runs until Ctrl+C.
+
 --start/--end/--tone are given together or not at all; a partial set is an
 error rather than a half-manual guess. Manual mode never mixes in VO (there is
 no punchline_at to place it against) — that's the segments.json path only.
@@ -119,6 +124,10 @@ def main(argv: list[str] | None = None) -> None:
         "--force", action="store_true", help="re-copy vo_{n}.wav (never re-pays for cached text)"
     )
 
+    review_p = sub.add_parser("review", help="stage 5 only: local approve/reject UI")
+    review_p.add_argument("video_id", help="video id with at least one rendered out_{n}.mp4")
+    review_p.add_argument("--port", type=int, default=8765, help="local server port (default 8765)")
+
     args = parser.parse_args(argv)
 
     if args.command == "select":
@@ -201,6 +210,11 @@ def main(argv: list[str] | None = None) -> None:
             **vo_kwargs,
         )
         print(out)
+
+    elif args.command == "review":
+        from .review import review
+
+        review(args.video_id, port=args.port)
 
     else:  # argparse enforces required=True, but be explicit rather than silent.
         parser.error(f"unknown command {args.command!r}")

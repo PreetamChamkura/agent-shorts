@@ -121,6 +121,7 @@ def _raw(**over):
         "end": 40.0,
         "punchline_at": 35.0,
         "tone": "burn",
+        "loopable": False,
         "hook": "a hook",
         "caption_title": "TITLE",
         "vo_script": "a perfectly reasonable narrator line that frames the clip",
@@ -137,6 +138,21 @@ def test_validate_segment_accepts_good_segment():
     assert seg is not None
     assert seg["tone"] == "burn"
     assert seg["start"] == 10.0
+    assert seg["loopable"] is False
+
+
+def test_validate_segment_passes_through_loopable_true():
+    seg = validate_segment(_raw(loopable=True), _words(60))
+    assert seg is not None
+    assert seg["loopable"] is True
+
+
+def test_validate_segment_defaults_loopable_false_when_missing():
+    raw = _raw()
+    del raw["loopable"]
+    seg = validate_segment(raw, _words(60))
+    assert seg is not None
+    assert seg["loopable"] is False
 
 
 def test_validate_segment_drops_vague_why():

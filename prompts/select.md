@@ -42,6 +42,12 @@ If there is nothing — the clip is entirely self-explanatory — set `vo_script
 
 Assign exactly one of: burn, chaotic, wholesome, awkward, revealing, confident. Pick the one describing the payoff, not the setup. If two fit, pick the one a viewer would name after watching.
 
+## Loop potential
+
+Check whether the segment's ending could flow naturally back into its start if the clip repeated seamlessly — the same motion, sentence, or beat picking back up as if uninterrupted. This is rare. Most segments are not loopable, and forcing it produces a worse clip than admitting it isn't there.
+
+Set `loopable` to `true` only when the loop would be genuinely seamless, not merely tolerable. Never trim or shift `start`/`end` to manufacture a loop — the boundaries are set by the beat-structure rules above; loopability is an observation about the segment as already defined, not a target to hit.
+
 ## Output
 
 Return only a JSON object. No prose, no markdown fences, no preamble.
@@ -53,6 +59,7 @@ Return only a JSON object. No prose, no markdown fences, no preamble.
       "end": 441.2,
       "punchline_at": 437.1,
       "tone": "revealing",
+      "loopable": false,
       "hook": "six-word description",
       "caption_title": "SHORT PUNCHY TITLE",
       "vo_script": "the narrator line, or null",
@@ -71,5 +78,6 @@ Field rules:
 - `confidence` 0.0-1.0, be harsh. 0.9+ means you'd bet it performs. 0.7 is the floor. Below 0.7, omit entirely rather than returning a low score
 - `caption_title`: max 5 words, no emoji, no clickbait phrasing
 - `vo_placement`: "cold_open" or "pre_punchline"
+- `loopable`: boolean, default `false`. `true` only for a genuinely seamless repeat — most segments should stay `false`
 
 Return {"segments": []} if nothing qualifies. That is a correct and expected answer for most windows.

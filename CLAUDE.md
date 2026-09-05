@@ -61,6 +61,7 @@ Caching is load-bearing. Renders get re-run dozens of times while tuning. Re-run
     "end": 441.2,
     "punchline_at": 437.1,
     "tone": "revealing",
+    "loopable": false,
     "hook": "prediction that aged badly",
     "caption_title": "HE HAD NO IDEA",
     "vo_script": "He said this three weeks before the exact thing he ruled out happened.",
@@ -74,6 +75,8 @@ Caching is load-bearing. Renders get re-run dozens of times while tuning. Re-run
 `start` and `end` MUST be snapped to word boundaries from words.json after the model returns. Model timestamps drift 200-600ms and a clip starting mid-word feels broken.
 
 Validate `why` contains two parseable timestamps. If not, drop the segment — it means the model didn't actually locate the beat.
+
+`loopable` is true only for the small minority of segments whose ending flows naturally back into their start. When true, stage 4 should end cleanly on the last frame — no fade, no hard cut — so a platform's auto-repeat creates the loop illusion. This does not apply to ordinary segments.
 
 ## Narrator persona
 
@@ -94,10 +97,13 @@ A friend who has already seen the clip and hands it to you with one line of setu
 - Never explain the joke that's coming. Set up, then get out
 - Mild profanity at most; advertiser-friendly by default
 - Name the source when known and it adds context
+- Use punctuation for pacing, not for hype. A short pause via an em-dash or ellipsis before the key word helps TTS delivery land naturally — but the words on either side of the pause still have to follow every other rule here
 
 ### The test
 
 Read the line without the clip. Slightly curious means it works. If it only makes sense after seeing the clip, it's describing rather than framing.
+
+Stronger bar: could you tell someone one true fact about this moment's backstory, history, or context that they wouldn't get from the clip alone? If the line only re-angles what's already visible, it's not there yet — that's the difference between commentary and captioning with extra words.
 
 ### Good
 

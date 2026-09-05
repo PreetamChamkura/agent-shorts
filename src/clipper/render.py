@@ -85,6 +85,13 @@ def _caption_and_watermark_tail(
     )
 
 
+# None of the three compositions below apply a video fade in/out. That's
+# deliberate, not an oversight: a segment flagged `loopable` in segments.json
+# depends on ending cleanly on the last frame for a platform's auto-repeat to
+# read as a seamless loop (CLAUDE.md). If a fade-out is ever added here, gate
+# it on `not loopable`.
+
+
 def _blur_fill_filtergraph(ass_path: str, fonts_dir: str, wm_font: str, audio_tail: str) -> str:
     tail = _caption_and_watermark_tail("comp", ass_path, fonts_dir, wm_font)
     return (
