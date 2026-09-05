@@ -1,24 +1,38 @@
 """Stage 1 — ingest.
 
-Reads: nothing (takes a YouTube URL).
+Reads: nothing (takes a video URL — YouTube or Twitch, anything yt-dlp
+supports; the rest of the pipeline is source-agnostic once source.mp4 exists).
 Writes: work/{video_id}/source.mp4, work/{video_id}/source.info.json
 
 Best mp4 up to 1080p. Skips the download when source.mp4 already exists unless
 `force`. Never re-downloads on a rerun — caching is load-bearing.
 
-Livestreams: this pipeline is batch (download -> transcribe -> select), which
-needs a finite file. A stream that is still airing has no end, and yt-dlp
-follows the live edge in real time until the broadcast stops, so ingesting one
-would block for however long the streamer keeps going — an hour, or twelve.
-So the mode we rely on is the VOD path (`was_live`): wait for the stream to
-end, then ingest the recording like any other video. That path needs no
-special handling and is what `--live-from-start` would otherwise be for.
+Livestreams (YouTube and Twitch both): this pipeline is batch
+(download -> transcribe -> select), which needs a finite file. A stream that
+is still airing has no end, and yt-dlp follows the live edge in real time
+until the broadcast stops, so ingesting one would block for however long the
+streamer keeps going — an hour, or twelve. So the mode we rely on is the VOD
+path (`was_live`): wait for the stream to end, then ingest the recording like
+any other video. That path needs no special handling and is what
+`--live-from-start` would otherwise be for.
 
 Recording an in-progress stream is still possible via `live_from_start=True`,
 but it is opt-in precisely because it blocks until the broadcast ends, and
 yt-dlp documents the flag as experimental (YouTube/Twitch/TVer/mellow-fan
 only). Without the opt-in, a live URL fails loudly rather than silently
 hanging on what looks like an ordinary download.
+
+Twitch VODs specifically: check_live_status needs no Twitch-specific branch.
+Twitch's extractor reports `is_live=True, was_live=True` for a VOD whose
+channel is still live (the recording is still growing) and
+`is_live=False, was_live=True` once it's finished — yt-dlp's own derivation
+collapses those to live_status 'is_live' and 'was_live' respectively, which
+this module already gates on. Twitch ids also come back prefixed ('v12345'),
+which only affects the work dir name, not any logic here. The same is true
+of the format selector: Twitch's HLS formats are muxed (no separate
+audio-only track like YouTube's DASH), so `_FORMAT`'s bestvideo+bestaudio
+alternative never matches and it falls through to its own
+`best[height<=1080][ext=mp4]` fallback, which does.
 """
 
 from __future__ import annotations

@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     clip_p = sub.add_parser("clip", help="ingest + transcribe + select + narrate + render")
-    clip_p.add_argument("url", help="YouTube URL")
+    clip_p.add_argument("url", help="video URL (YouTube or Twitch)")
     clip_p.add_argument(
         "--live-from-start",
         action="store_true",
