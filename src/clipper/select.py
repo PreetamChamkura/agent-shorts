@@ -474,6 +474,19 @@ def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
     if not windows:
         raise ValueError(f"select: {words_path} has no words to window")
 
+    # Window count scales linearly with source length (~8 windows/hour at the
+    # current 480s window / 450s step), and each window is one LLM call. A
+    # multi-hour livestream therefore costs an order of magnitude more than a
+    # podcast episode. Say so up front rather than only in the per-window logs.
+    span = max(float(w["end"]) for w in words) - float(words[0]["start"])
+    log.info(
+        "select: %d windows over %.1f hours of transcript = %d LLM calls to %s",
+        len(windows),
+        span / 3600,
+        len(windows),
+        model,
+    )
+
     template = (PROMPTS_DIR / "select.md").read_text()
     meta = _source_metadata(wd)
 

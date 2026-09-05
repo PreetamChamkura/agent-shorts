@@ -114,6 +114,14 @@ def main(argv: list[str] | None = None) -> None:
 
     clip_p = sub.add_parser("clip", help="ingest + transcribe + select + narrate + render")
     clip_p.add_argument("url", help="YouTube URL")
+    clip_p.add_argument(
+        "--live-from-start",
+        action="store_true",
+        help=(
+            "record a still-airing stream from its start. BLOCKS until the broadcast "
+            "ends; experimental in yt-dlp. Normally you want the VOD instead."
+        ),
+    )
     _add_clip_args(clip_p)
 
     render_p = sub.add_parser("render", help="render only (no download / transcribe / LLM)")
@@ -175,7 +183,9 @@ def main(argv: list[str] | None = None) -> None:
         from .transcribe import transcribe
 
         manual = _manual_spec(args)
-        video_id = ingest(args.url, force=args.force)
+        video_id = ingest(
+            args.url, force=args.force, live_from_start=getattr(args, "live_from_start", False)
+        )
         transcribe(video_id, force=args.force)
 
         if manual:
