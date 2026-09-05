@@ -76,7 +76,9 @@ Caching is load-bearing. Renders get re-run dozens of times while tuning. Re-run
 
 Validate `why` contains two parseable timestamps. If not, drop the segment — it means the model didn't actually locate the beat.
 
-`loopable` is true only for the small minority of segments whose ending flows naturally back into their start. When true, stage 4 should end cleanly on the last frame — no fade, no hard cut — so a platform's auto-repeat creates the loop illusion. This does not apply to ordinary segments.
+`end` must also cover the payoff phrase `why` quotes verbatim, when one can be reliably located — extend forward if short (as long as the result still fits 18-58s), otherwise drop the segment. The model's own numeric "payoff at N" marker is not sufficient on its own: `end` can already exceed that marker while still truncating the quoted payoff, because the marker itself can be short of where the quote actually finishes.
+
+`loopable` is true only for the small minority of segments whose ending flows naturally back into their start. When true, stage 4 should end cleanly on the last frame — no fade, no hard cut — so a platform's auto-repeat creates the loop illusion. This does not apply to ordinary segments. Stage 4 re-snaps `end` to a word boundary and confirms the frame at that exact timestamp is stable (not mid-blink or motion-blurred) before freezing on it, stepping back a few frames if it isn't.
 
 ## Narrator persona
 

@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> None:
         transcribe(video_id, force=args.force)
 
         if manual:
-            start, end, tone, vo_kwargs = args.start, args.end, args.tone, {}
+            start, end, tone, vo_kwargs, loopable = args.start, args.end, args.tone, {}, False
         else:
             from .narrate import narrate
             from .select import select
@@ -185,6 +185,7 @@ def main(argv: list[str] | None = None) -> None:
             seg = _segment_from_file(video_id, args.n)
             start, end, tone = float(seg["start"]), float(seg["end"]), str(seg["tone"])
             vo_kwargs = _vo_kwargs(seg)
+            loopable = bool(seg.get("loopable", False))
 
         out = render(
             video_id,
@@ -193,6 +194,7 @@ def main(argv: list[str] | None = None) -> None:
             end,
             tone,
             composition=args.composition,
+            loopable=loopable,
             force=args.force,
             **vo_kwargs,
         )
@@ -202,11 +204,12 @@ def main(argv: list[str] | None = None) -> None:
         from .render import render
 
         if _manual_spec(args):
-            start, end, tone, vo_kwargs = args.start, args.end, args.tone, {}
+            start, end, tone, vo_kwargs, loopable = args.start, args.end, args.tone, {}, False
         else:
             seg = _segment_from_file(args.video_id, args.n)
             start, end, tone = float(seg["start"]), float(seg["end"]), str(seg["tone"])
             vo_kwargs = _vo_kwargs(seg)
+            loopable = bool(seg.get("loopable", False))
 
         out = render(
             args.video_id,
@@ -215,6 +218,7 @@ def main(argv: list[str] | None = None) -> None:
             end,
             tone,
             composition=args.composition,
+            loopable=loopable,
             force=args.force,
             **vo_kwargs,
         )

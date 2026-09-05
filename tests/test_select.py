@@ -5,6 +5,10 @@ from __future__ import annotations
 import pytest
 
 from clipper.select import (
+    _extract_payoff_marker,
+    _extract_payoff_quote,
+    _find_phrase_end,
+    _snap_end_forward,
     build_windows,
     dedupe,
     format_mmss,
@@ -112,6 +116,71 @@ def test_snap_to_words_empty_raises():
         snap_to_words([], 1.0, 2.0)
 
 
+def test_snap_end_forward_extends_into_containing_word_not_nearest_end():
+    # raw_end (10.2) falls inside a long word (10.15-15.0), but a much
+    # closer-by-distance word ends right before it (10.0-10.1). Nearest-
+    # neighbor would incorrectly backward-snap to 10.1, cutting the long
+    # word off entirely before it even started. Forward-bias must not.
+    words = [
+        {"word": "a", "start": 10.0, "end": 10.1},
+        {"word": "verylongword", "start": 10.15, "end": 15.0},
+    ]
+    assert _snap_end_forward(words, 10.2) == 15.0
+
+
+def test_snap_end_forward_gap_uses_nearest_at_or_before():
+    # raw_end sits in a silence gap between words — nothing to extend into.
+    words = [{"word": "a", "start": 1.0, "end": 2.0}, {"word": "b", "start": 5.0, "end": 6.0}]
+    assert _snap_end_forward(words, 3.5) == 2.0
+
+
+def test_snap_end_forward_before_all_words_falls_back_to_nearest():
+    words = [{"word": "a", "start": 10.0, "end": 11.0}]
+    assert _snap_end_forward(words, 2.0) == 11.0
+
+
+# --- payoff quote extraction and coverage ------------------------------------
+
+
+def test_extract_payoff_marker():
+    assert _extract_payoff_marker("setup at 1, payoff at 112.0, reaction to 119") == 112.0
+    assert _extract_payoff_marker("no payoff mentioned here") is None
+
+
+def test_extract_payoff_quote_handles_contractions():
+    why = "payoff at 112.0 with 'he's not the best, but he's very affordable'; reaction to 119.0"
+    assert _extract_payoff_quote(why) == "he's not the best, but he's very affordable"
+
+
+def test_extract_payoff_quote_none_when_paraphrased():
+    assert _extract_payoff_quote("payoff at 50 shows him laughing, no quote given") is None
+
+
+def test_find_phrase_end_locates_real_completion():
+    words = [
+        {"word": "he's", "start": 118.34, "end": 119.22},
+        {"word": "very", "start": 119.22, "end": 119.30},
+        {"word": "affordable.", "start": 119.30, "end": 119.60},
+    ]
+    assert _find_phrase_end(words, "very affordable", 118.0) == 119.60
+
+
+def test_find_phrase_end_none_when_not_found():
+    words = [{"word": "hello", "start": 0.0, "end": 0.5}]
+    assert _find_phrase_end(words, "goodbye world", 0.0) is None
+
+
+def test_find_phrase_end_ignores_earlier_unrelated_occurrence():
+    words = [
+        {"word": "very", "start": 5.0, "end": 5.3},
+        {"word": "good.", "start": 5.3, "end": 5.6},
+        {"word": "he's", "start": 118.0, "end": 118.3},
+        {"word": "very", "start": 118.3, "end": 118.5},
+        {"word": "good.", "start": 118.5, "end": 118.8},
+    ]
+    assert _find_phrase_end(words, "very good", 118.0) == 118.8
+
+
 # --- segment validation -----------------------------------------------------
 
 
@@ -166,6 +235,53 @@ def test_validate_segment_drops_low_confidence():
 def test_validate_segment_drops_out_of_range_duration():
     # 10 -> 20 is only 10s, under the 18s floor
     assert validate_segment(_raw(end=20.0, punchline_at=19.0), _words(60)) is None
+
+
+def test_validate_segment_extends_end_to_cover_quoted_payoff():
+    # Replicates the real incident: raw end lands short of the payoff quote
+    # the model itself names in `why`. Lead words pad past MIN_DURATION.
+    lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(18)]
+    payoff_words = [
+        {"word": "he's", "start": 18.0, "end": 18.3},
+        {"word": "very", "start": 18.3, "end": 18.5},
+        {"word": "affordable.", "start": 18.5, "end": 18.8},
+    ]
+    words = lead + payoff_words
+    raw = _raw(
+        start=0.0,
+        end=18.3,  # would snap to "he's" end — short of the quoted payoff
+        punchline_at=17.0,
+        why="setup at 0.0, payoff at 18.0 with 'he's very affordable'",
+    )
+    seg = validate_segment(raw, words)
+    assert seg is not None
+    assert seg["end"] == 18.8  # extended to cover "affordable."
+
+
+def test_validate_segment_drops_when_payoff_extension_exceeds_max_duration():
+    lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(60)]
+    tail = [
+        {"word": "he's", "start": 60.0, "end": 60.3},
+        {"word": "very", "start": 60.3, "end": 60.5},
+        {"word": "affordable.", "start": 60.5, "end": 60.8},
+    ]
+    words = lead + tail
+    raw = _raw(
+        start=0.0,
+        end=30.0,
+        punchline_at=25.0,
+        why="setup at 0.0, payoff at 60.0 with 'he's very affordable'",
+    )
+    assert validate_segment(raw, words) is None
+
+
+def test_validate_segment_skips_coverage_check_when_quote_not_found():
+    # Model paraphrased rather than quoted verbatim (confirmed to happen on
+    # real output) — no reliable check possible, so it must not reject.
+    words = _words(60)
+    raw = _raw(why="setup at 10.0, payoff at 30.0 with 'a phrase not in the transcript'")
+    seg = validate_segment(raw, words)
+    assert seg is not None
 
 
 def test_validate_segment_drops_early_punchline():

@@ -8,7 +8,12 @@ for up to 3 standalone moments per window, then validates hard before anything
 reaches segments.json:
 
   - start/end snapped to word boundaries from words.json (model timestamps
-    drift; a clip starting mid-word feels broken)
+    drift; a clip starting mid-word feels broken). `end` is forward-biased —
+    it extends to cover a word it lands inside, never truncates it
+  - `end` must also cover the payoff phrase `why` quotes verbatim, when one
+    can be reliably located — extended forward if short (within MAX_DURATION),
+    else the segment is dropped. Catches a truncated punchline that a bare
+    numeric comparison against the model's own "payoff at N" marker would miss
   - `why` must contain two parseable timestamps, else the segment is dropped —
     a vague `why` means the model didn't actually locate the beat
   - duration inside 18-58s, punchline in the last third, confidence >= 0.7
@@ -189,20 +194,98 @@ def why_is_located(why: str) -> bool:
 
 
 def snap_to_words(words: list[dict], start: float, end: float) -> tuple[float, float]:
-    """Snap ``start``/``end`` to the nearest word boundaries.
+    """Snap ``start``/``end`` to word boundaries.
 
-    Model timestamps drift 200-600ms and a clip starting mid-word feels broken,
-    so start lands on a word's start and end on a word's end.
+    Model timestamps drift 200-600ms and a clip starting mid-word feels
+    broken. ``start`` snaps to the nearest word start — jitter there just
+    shifts the open by a few hundred ms either way, harmless. ``end`` is
+    forward-biased (see _snap_end_forward): nearest-by-distance can pick an
+    earlier word's end that's merely closer, truncating the word the raw
+    value actually falls inside. This didn't cause the incident that added
+    this comment (see _find_phrase_end below for what did), but it's a real,
+    separate defect worth closing on its own.
     """
     if not words:
         raise ValueError("snap_to_words: no words to snap to")
     snapped_start = min((float(w["start"]) for w in words), key=lambda s: abs(s - start))
-    snapped_end = min((float(w["end"]) for w in words), key=lambda e: abs(e - end))
+    snapped_end = _snap_end_forward(words, end)
     return round(snapped_start, 2), round(snapped_end, 2)
+
+
+def _snap_end_forward(words: list[dict], raw_end: float) -> float:
+    """Forward-biased end snap: if ``raw_end`` falls inside a word's own
+    span, extend to THAT word's end so the word is never cut off mid-way.
+    Only falls back to nearest-by-distance when ``raw_end`` sits in a
+    silence gap between words (nothing to extend into) or before every word
+    (degenerate input) — in the gap case the nearest word end at or before
+    ``raw_end`` is used, since there's no reason to invent content forward
+    into a word that hadn't started yet.
+    """
+    containing = [w for w in words if float(w["start"]) <= raw_end < float(w["end"])]
+    if containing:
+        return max(float(w["end"]) for w in containing)
+    at_or_before = [float(w["end"]) for w in words if float(w["end"]) <= raw_end]
+    if at_or_before:
+        return max(at_or_before)
+    return min((float(w["end"]) for w in words), key=lambda e: abs(e - raw_end))
 
 
 def _vo_word_count(vo_script: str) -> int:
     return len(vo_script.split())
+
+
+# "payoff at N" — the model's own numeric marker. Not trustworthy on its own
+# for validating coverage (see _find_phrase_end): a snapped `end` can already
+# exceed this number while still cutting off mid-payoff, because the model's
+# own arithmetic estimate of where its quote ends can itself be short.
+_PAYOFF_MARKER_RE = re.compile(r"payoff\s+at\s+(\d+(?:\.\d+)?)", re.IGNORECASE)
+
+# The verbatim payoff quote in `why`, e.g. "...payoff at 112.0 with 'he's not
+# the best, but he's very affordable'...". A quote delimiter is a `'` NOT
+# flanked by a letter on the outward side; a contraction's apostrophe (he's,
+# don't) has a letter on both sides and is skipped by the lookbehind/lookahead.
+_PAYOFF_QUOTE_RE = re.compile(
+    r"payoff\b.*?(?<![a-zA-Z])'(.+?)'(?![a-zA-Z])", re.IGNORECASE | re.DOTALL
+)
+
+
+def _extract_payoff_marker(why: str) -> float | None:
+    m = _PAYOFF_MARKER_RE.search(why)
+    return float(m.group(1)) if m else None
+
+
+def _extract_payoff_quote(why: str) -> str | None:
+    """The verbatim payoff phrase `why` quotes, or None if the model
+    paraphrased instead of quoting — that happens, and no reliable coverage
+    check is possible without a verbatim quote to search for."""
+    m = _PAYOFF_QUOTE_RE.search(why)
+    return m.group(1) if m else None
+
+
+def _normalize_token(tok: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", tok.lower())
+
+
+def _find_phrase_end(words: list[dict], phrase: str, search_from: float) -> float | None:
+    """Where ``phrase``'s last word actually ends in ``words``.
+
+    Searches only from shortly before ``search_from`` (the payoff marker)
+    onward, so an earlier, unrelated occurrence of the same words can't be
+    matched instead. Returns None if the phrase isn't a contiguous token
+    run in the transcript — the model paraphrased rather than quoting
+    verbatim (confirmed to happen on real output), and no reliable check is
+    possible then; callers should skip enforcement rather than guess.
+    """
+    tokens = [t for t in (_normalize_token(tok) for tok in phrase.split()) if t]
+    if not tokens:
+        return None
+    candidates = [w for w in words if float(w["start"]) >= search_from - 1.0]
+    norm_words = [_normalize_token(w["word"]) for w in candidates]
+    n = len(tokens)
+    for i in range(len(norm_words) - n + 1):
+        if norm_words[i : i + n] == tokens:
+            return float(candidates[i + n - 1]["end"])
+    return None
 
 
 def validate_segment(raw: dict, words: list[dict]) -> dict | None:
@@ -239,6 +322,37 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
         return None
 
     start, end = snap_to_words(words, start, end)
+
+    # `end` must cover the payoff phrase `why` itself quotes verbatim, not
+    # just exceed the model's own numeric "payoff at N" marker — that marker
+    # can already be short of the quote's true completion (confirmed on real
+    # output: end 119.22s > marker's stated "119.0s", yet still cut off
+    # "very affordable" before it finished at 119.60s). Only enforced when
+    # the quote can be reliably located; a paraphrased why or an unmatched
+    # quote falls back to the checks below rather than risking a
+    # false-positive rejection on transcription noise.
+    payoff_quote = _extract_payoff_quote(why)
+    if payoff_quote:
+        marker = _extract_payoff_marker(why) or start
+        phrase_end = _find_phrase_end(words, payoff_quote, marker)
+        if phrase_end is not None and phrase_end > end:
+            if phrase_end - start <= MAX_DURATION:
+                log.info(
+                    "select: %r end %.2f fell short of quoted payoff (ends %.2f) — extending",
+                    hook,
+                    end,
+                    phrase_end,
+                )
+                end = phrase_end
+            else:
+                log.info(
+                    "select: dropped %r — quoted payoff ends %.2f, past %.0fs even snapped forward",
+                    hook,
+                    phrase_end,
+                    MAX_DURATION,
+                )
+                return None
+
     duration = end - start
     if not (MIN_DURATION <= duration <= MAX_DURATION):
         log.info(

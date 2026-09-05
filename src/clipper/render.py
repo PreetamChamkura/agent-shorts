@@ -22,8 +22,19 @@ the clip, not under it, which also lengthens the final render by the VO's
 duration. `pre_punchline` hard-cuts the source to silence for the VO's window
 (not ducked) and resumes full volume immediately after. Passing neither
 `punchline_at` nor `vo_placement` means no VO — the normal path when
-vo_script was null or TTS failed. Every ffmpeg/ffprobe call goes through
-run_ffmpeg/run_ffprobe. Re-running never touches stage 1, 2, or 3.5.
+vo_script was null or TTS failed.
+
+Loop hold (CLAUDE.md: a `loopable` segment must end cleanly on the last frame
+so a platform's auto-repeat reads as seamless): when the caller passes
+``loopable=True``, `end` is re-snapped to a word boundary (mirrors
+select.py's forward bias — duplicated rather than imported, to keep stage
+modules independent per CLAUDE.md's stage contract) and the exact frame at
+that timestamp is checked for stability against its neighbor; an unstable
+(mid-blink/motion-blurred) frame steps backward a few frames at a time until
+a stable one is found. Non-loopable segments are untouched by any of this.
+
+Every ffmpeg/ffprobe call goes through run_ffmpeg/run_ffprobe. Re-running
+never touches stage 1, 2, or 3.5.
 """
 
 from __future__ import annotations
@@ -31,6 +42,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import tempfile
+from pathlib import Path
 
 from .ass import Word, build_ass
 from .ffmpeg import run_ffmpeg, run_ffprobe
@@ -48,6 +61,13 @@ WATERMARK_Y = 1400  # below the caption band, still inside the y 250-1520 safe z
 
 # Tight-crop scale-up factor: 1080 * 1.6 = 1728 wide, cropped back to 1080.
 TIGHT_CROP_WIDTH = 1728
+
+# Loop-hold frame stability search. A small grayscale thumbnail is plenty for
+# a "did anything move" check — this deliberately doesn't need to be fancy.
+LOOP_SEARCH_FRAMES = 15  # ~0.5s at 30fps
+LOOP_FRAME_SIZE = 64
+LOOP_MOTION_THRESHOLD = 6.0  # mean abs pixel diff (0-255); untuned heuristic
+# — no real loopable:true segment has been produced yet to calibrate against.
 
 COMPOSITIONS = ("blur_fill", "tight_crop", "split_screen")
 
@@ -228,6 +248,126 @@ def _shift_words(words: list[Word], offset: float) -> list[Word]:
     ]
 
 
+def _snap_loop_end_forward(words: list[dict], raw_end: float) -> float:
+    """Forward-biased word-boundary snap, for `loopable` segments only.
+
+    Deliberately mirrors clipper.select._snap_end_forward rather than
+    importing it — CLAUDE.md's stage contract keeps stage modules
+    independent, and this is small enough that duplicating it costs less
+    than coupling render() to select()'s internals. select.py should
+    already have snapped `end` correctly by the time it reaches here; this
+    is defense-in-depth specifically for the loop case, where landing
+    mid-word matters even more than usual.
+    """
+    containing = [w for w in words if float(w["start"]) <= raw_end < float(w["end"])]
+    if containing:
+        return max(float(w["end"]) for w in containing)
+    at_or_before = [float(w["end"]) for w in words if float(w["end"]) <= raw_end]
+    if at_or_before:
+        return max(at_or_before)
+    return raw_end
+
+
+def _read_pgm_gray(path: Path) -> bytes:
+    """Parse a binary grayscale PGM (P5) into raw pixel bytes. No imaging
+    library needed — PGM is a trivial fixed format, unlike PNG/JPEG."""
+    data = path.read_bytes()
+    if not data.startswith(b"P5"):
+        raise ValueError(f"not a binary PGM: {path}")
+    tokens: list[bytes] = []
+    i = 2
+    while len(tokens) < 3:
+        while data[i : i + 1].isspace():
+            i += 1
+        if data[i : i + 1] == b"#":
+            while data[i : i + 1] not in (b"\n", b""):
+                i += 1
+            continue
+        j = i
+        while not data[j : j + 1].isspace():
+            j += 1
+        tokens.append(data[i:j])
+        i = j
+    width, height, _maxval = (int(t) for t in tokens)
+    i += 1  # the single whitespace byte separating the header from pixel data
+    return data[i : i + width * height]
+
+
+def _mean_abs_diff(a: bytes, b: bytes) -> float:
+    """Mean absolute per-pixel difference between two equal-length grayscale
+    frames — a coarse but adequate "how much moved" signal."""
+    return sum(abs(x - y) for x, y in zip(a, b, strict=True)) / len(a)
+
+
+def _extract_loop_candidate_frames(source: str, clip_end_abs: float, tmp_dir: Path) -> list[bytes]:
+    """LOOP_SEARCH_FRAMES+1 small grayscale frames ending at ``clip_end_abs``
+    (absolute seconds into ``source``), oldest first. The extra leading frame
+    gives every real candidate a prior neighbor to diff against.
+    """
+    lead = (LOOP_SEARCH_FRAMES + 1) / 30.0
+    window_start = max(0.0, clip_end_abs - lead)
+    pattern = tmp_dir / "f_%03d.pgm"
+    run_ffmpeg(
+        [
+            "-y",
+            "-ss",
+            f"{window_start:.3f}",
+            "-i",
+            source,
+            "-t",
+            f"{lead:.3f}",
+            "-vf",
+            f"scale={LOOP_FRAME_SIZE}:{LOOP_FRAME_SIZE},format=gray",
+            "-vsync",
+            "0",
+            str(pattern),
+        ]
+    )
+    frames = sorted(tmp_dir.glob("f_*.pgm"))
+    return [_read_pgm_gray(f) for f in frames]
+
+
+def pick_loop_freeze_end(source: str, clip_end_abs: float) -> float:
+    """For a loopable segment, confirm the frame at ``clip_end_abs`` isn't
+    mid-blink/motion-blurred (a stable, low frame-to-frame difference); if it
+    is, step backward frame-by-frame — up to LOOP_SEARCH_FRAMES — until one
+    passes, rather than forcing the exact snapped timestamp. Returns the
+    (possibly earlier) absolute timestamp to actually end on.
+    """
+    with tempfile.TemporaryDirectory(prefix="clipper_loop_") as td:
+        frames = _extract_loop_candidate_frames(source, clip_end_abs, Path(td))
+        if len(frames) < 2:
+            log.warning(
+                "render: only %d frame(s) available near loop end %.3fs — using it as-is",
+                len(frames),
+                clip_end_abs,
+            )
+            return clip_end_abs
+
+        for offset in range(len(frames) - 1):
+            idx = len(frames) - 1 - offset
+            diff = _mean_abs_diff(frames[idx], frames[idx - 1])
+            if diff <= LOOP_MOTION_THRESHOLD:
+                adjusted = round(clip_end_abs - offset / 30.0, 3)
+                if offset:
+                    log.info(
+                        "render: loop end frame at %.3fs was unstable (diff=%.1f), "
+                        "using %.3fs instead (%d frame(s) earlier)",
+                        clip_end_abs,
+                        diff,
+                        adjusted,
+                        offset,
+                    )
+                return adjusted
+
+        log.warning(
+            "render: no frame within %d frames of loop end %.3fs was stable — using it anyway",
+            LOOP_SEARCH_FRAMES,
+            clip_end_abs,
+        )
+        return clip_end_abs
+
+
 def _probe_duration(path: str) -> float:
     proc = run_ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "json", path])
     return float(json.loads(proc.stdout)["format"]["duration"])
@@ -310,6 +450,7 @@ def render(
     composition: str = "tight_crop",
     punchline_at: float | None = None,
     vo_placement: str | None = None,
+    loopable: bool = False,
     force: bool = False,
 ) -> str:
     """Render clip ``n`` of ``video_id`` between ``start`` and ``end`` seconds.
@@ -322,6 +463,11 @@ def render(
     ``punchline_at`` and ``vo_placement`` opt into VO mixing and are only
     honored when work/{video_id}/vo_{n}.wav also exists — pass neither for the
     normal no-VO path (vo_script was null, or stage 3.5 flagged tts_failed).
+
+    ``loopable`` re-snaps `end` to a word boundary and to a stable (non-blink,
+    non-motion-blurred) frame before encoding — see module docstring. False
+    (the default) keeps current behavior exactly; pass segments.json's
+    `loopable` flag through unchanged.
 
     Returns the path to out_{n}.mp4.
     """
@@ -357,6 +503,29 @@ def render(
     if out_path.exists() and not force:
         log.info("render: cache hit for %s (%s), skipping. Pass force to re-render.", out_path, n)
         return str(out_path)
+
+    words = json.loads(words_path.read_text())["words"]
+
+    if loopable:
+        # Defense-in-depth even though select.py's snap_to_words should
+        # already land on a word boundary: re-snap here too, then confirm
+        # the exact frame at that timestamp is stable enough to freeze/loop
+        # on, stepping back a few frames if not. Non-loopable segments never
+        # enter this branch — the "no fade" comment above stays correct for
+        # them unchanged.
+        snapped_end = _snap_loop_end_forward(words, end)
+        if snapped_end != end:
+            log.info("render: loopable end %.2f -> %.2f (word-boundary re-snap)", end, snapped_end)
+            end = snapped_end
+        adjusted_end = pick_loop_freeze_end(str(source), end)
+        if adjusted_end != end:
+            end = adjusted_end
+        duration = end - start
+        if not (MIN_DURATION <= duration <= MAX_DURATION):
+            raise ValueError(
+                f"render: loop-adjusted duration {duration:.1f}s outside "
+                f"{MIN_DURATION}-{MAX_DURATION}s (start={start}, end={end})"
+            )
 
     fonts_dir = str(CAPTION_FONT.parent)
     wm_font = str(WATERMARK_FONT)
@@ -401,7 +570,6 @@ def render(
     # the clip, so captions (timed relative to the clip) must shift by the
     # same amount to still land on the real footage once it starts.
     caption_offset = vo["duration"] if vo and vo["placement"] == "cold_open" else 0.0
-    words = json.loads(words_path.read_text())["words"]
     clip_words = _shift_words(_clip_words(words, start, end), caption_offset)
     ass_text = build_ass(clip_words, group_size, style_overrides)
     ass_path.write_text(ass_text)
