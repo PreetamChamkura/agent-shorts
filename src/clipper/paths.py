@@ -22,6 +22,11 @@ STYLES_PATH = REPO_ROOT / "styles.yaml"
 # across every video_id — CLAUDE.md: "never pay twice for the same line."
 TTS_CACHE_DIR = WORK_DIR / "_tts_cache"
 
+# Cached Twitch app access token (client-credentials grant). Shared across
+# every fetch-clips/ingest call — refreshed proactively before expiry rather
+# than re-requested every invocation.
+TWITCH_CACHE_DIR = WORK_DIR / "_twitch_cache"
+
 # Fonts vendored per CLAUDE.md. Milestone 1 needs exactly these two.
 CAPTION_FONT = FONTS_DIR / "Montserrat-ExtraBold.ttf"  # ASS "Montserrat ExtraBold"
 WATERMARK_FONT = FONTS_DIR / "Montserrat-Bold.ttf"  # drawtext tail

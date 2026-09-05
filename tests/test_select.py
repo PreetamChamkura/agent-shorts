@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from clipper import paths
+from clipper import select as select_mod
 from clipper.select import (
+    MIN_DURATION,
     _extract_payoff_marker,
     _extract_payoff_quote,
     _find_phrase_end,
@@ -15,6 +20,7 @@ from clipper.select import (
     parse_timestamps,
     render_prompt,
     render_transcript,
+    select_clip,
     snap_to_words,
     validate_segment,
     why_is_located,
@@ -331,3 +337,116 @@ def test_dedupe_keeps_disjoint_segments():
     kept = dedupe([a, b])
     assert len(kept) == 2
     assert [s["start"] for s in kept] == [10.0, 100.0]  # sorted by start
+
+
+# --- select_clip: no windowing, one call, reuses validate_segment ----------
+# _call_model is the only networked seam (like select() itself, which has no
+# direct test either — CLAUDE.md: no network in tests) so it's monkeypatched
+# throughout, same pattern as narrate.py's tests mock _synthesize.
+
+
+def _setup_clip(tmp_path, monkeypatch, words, duration=None):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    wd = tmp_path / "clipid"
+    wd.mkdir(parents=True)
+    payload = {
+        "language": "en",
+        "duration": duration if duration is not None else 40.0,
+        "words": words,
+    }
+    (wd / "words.json").write_text(json.dumps(payload))
+    return wd
+
+
+def test_select_clip_rejects_below_floor_without_calling_model(tmp_path, monkeypatch):
+    wd = _setup_clip(tmp_path, monkeypatch, _words(10, step=1.0), duration=10.0)
+    calls = []
+    monkeypatch.setattr(
+        select_mod, "_call_model", lambda *a, **k: calls.append(1) or {"segments": []}
+    )
+
+    out = select_clip("clipid")
+    assert out["segments"] == []
+    assert calls == []  # never called — nothing to trim up to below MIN_DURATION
+    assert json.loads((wd / "segments.json").read_text())["segments"] == []
+
+
+def test_select_clip_calls_model_once_and_validates(tmp_path, monkeypatch):
+    words = _words(60, step=1.0)  # 0..59.4s, comfortably above MIN_DURATION
+    wd = _setup_clip(tmp_path, monkeypatch, words, duration=60.0)
+
+    raw_segment = {
+        "start": 5.0,
+        "end": 40.0,
+        "punchline_at": 35.0,
+        "tone": "burn",
+        "loopable": False,
+        "hook": "a hook",
+        "caption_title": "TITLE",
+        "vo_script": "a perfectly reasonable narrator line that frames the clip",
+        "vo_placement": "cold_open",
+        "why": "setup at 5.0 establishing X, payoff at 35.0",
+        "confidence": 0.85,
+    }
+    calls = []
+    monkeypatch.setattr(
+        select_mod,
+        "_call_model",
+        lambda client, prompt, model: calls.append(prompt) or {"segments": [raw_segment]},
+    )
+
+    out = select_clip("clipid")
+    assert len(calls) == 1
+    assert len(out["segments"]) == 1
+    seg = out["segments"][0]
+    assert seg["n"] == 0
+    assert seg["tone"] == "burn"
+    # went through the real validate_segment (snapped to word boundaries)
+    assert seg["start"] == 5.0
+    assert wd.joinpath("segments.json").exists()
+
+
+def test_select_clip_drops_invalid_segments_from_model(tmp_path, monkeypatch):
+    words = _words(60, step=1.0)
+    _setup_clip(tmp_path, monkeypatch, words, duration=60.0)
+    # missing two timestamps in `why` -> validate_segment drops it
+    bad_segment = {
+        "start": 5.0,
+        "end": 40.0,
+        "punchline_at": 35.0,
+        "tone": "burn",
+        "loopable": False,
+        "hook": "a hook",
+        "caption_title": "TITLE",
+        "vo_script": None,
+        "vo_placement": "cold_open",
+        "why": "it's just funny",
+        "confidence": 0.85,
+    }
+    monkeypatch.setattr(select_mod, "_call_model", lambda *a, **k: {"segments": [bad_segment]})
+    out = select_clip("clipid")
+    assert out["segments"] == []
+
+
+def test_select_clip_cache_hit_skips_model(tmp_path, monkeypatch):
+    wd = _setup_clip(tmp_path, monkeypatch, _words(60, step=1.0), duration=60.0)
+    (wd / "segments.json").write_text(json.dumps({"video_id": "clipid", "segments": [{"n": 0}]}))
+    calls = []
+    monkeypatch.setattr(
+        select_mod, "_call_model", lambda *a, **k: calls.append(1) or {"segments": []}
+    )
+    out = select_clip("clipid")
+    assert calls == []
+    assert out["segments"] == [{"n": 0}]
+
+
+def test_select_clip_missing_words_file_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    with pytest.raises(FileNotFoundError):
+        select_clip("nope")
+
+
+def test_min_duration_floor_matches_the_hard_range():
+    # Sanity: the pre-model reject threshold is the same 18s floor everything
+    # else in this module uses, not a separately-tuned number.
+    assert MIN_DURATION == 18.0

@@ -7,6 +7,11 @@ another. Subcommands:
       stage 3 only. Calls the LLM once per transcript window, writes
       segments.json. Cached — never re-called unless --force.
 
+  clipper select-clip VIDEO_ID [--force]
+      stage 3, clip variant (Twitch clips — CLAUDE.md step 2b). One LLM call
+      against the clip's whole transcript instead of windowing a long-form
+      video; same segments.json schema and validation as `select`.
+
   clipper narrate VIDEO_ID [--force]
       stage 3.5 only. Synthesizes vo_{n}.wav for every non-null vo_script in
       segments.json. Cached two ways — see clipper.narrate.
@@ -18,7 +23,10 @@ another. Subcommands:
       re-downloads, re-transcribes, or re-calls the LLM.
 
   clipper clip URL [...same clip args...]
-      ingest -> transcribe -> (select + narrate, if no manual args) -> render.
+      ingest -> transcribe -> (select|select-clip + narrate, if no manual
+      args) -> render. Routes to select-clip automatically when URL is a
+      Twitch clip (detected from the URL itself, not a flag) — see
+      clipper.twitch.is_twitch_clip_url.
 
   clipper review VIDEO_ID [--port N]
       stage 5 only. Starts a local review server (http://127.0.0.1:PORT/)
@@ -28,6 +36,11 @@ another. Subcommands:
   clipper fetch-gameplay [--limit N]
       setup tool, not a stage. Downloads filler footage into assets/gameplay/
       from the Pexels and Pixabay video APIs and writes sources.json.
+
+  clipper fetch-clips CHANNEL [--limit N] [--since T] [--until T] [--out PATH]
+      setup tool, not a stage. Lists a Twitch channel's clips via the Helix
+      API (id, view count, created date, title) — nothing downloaded.
+      Sanity-check the list before running `clipper clip` on any of them.
 
 --start/--end/--tone are given together or not at all; a partial set is an
 error rather than a half-manual guess. Manual mode never mixes in VO (there is
@@ -41,6 +54,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 
 
@@ -132,6 +146,14 @@ def main(argv: list[str] | None = None) -> None:
     select_p.add_argument("video_id", help="video id of an already-transcribed video")
     select_p.add_argument("--force", action="store_true", help="re-call the LLM, ignoring cache")
 
+    select_clip_p = sub.add_parser(
+        "select-clip", help="stage 3 (clip variant): one LLM call, no window-hunting"
+    )
+    select_clip_p.add_argument("video_id", help="video id of an already-transcribed clip")
+    select_clip_p.add_argument(
+        "--force", action="store_true", help="re-call the LLM, ignoring cache"
+    )
+
     narrate_p = sub.add_parser("narrate", help="stage 3.5 only: synthesize VO for segments.json")
     narrate_p.add_argument("video_id", help="video id of an already-selected video")
     narrate_p.add_argument(
@@ -147,12 +169,39 @@ def main(argv: list[str] | None = None) -> None:
     )
     fetch_p.add_argument("--limit", type=int, default=12, help="max clips to download (default 12)")
 
+    fetch_clips_p = sub.add_parser(
+        "fetch-clips",
+        help="setup tool: list a Twitch channel's clips (stage 2b discovery, no download)",
+    )
+    fetch_clips_p.add_argument("channel", help="Twitch channel login, e.g. 'shroud'")
+    fetch_clips_p.add_argument(
+        "--limit", type=int, default=10, help="max clips to list (default 10)"
+    )
+    fetch_clips_p.add_argument(
+        "--since", help="RFC3339 timestamp — only clips created at/after this"
+    )
+    fetch_clips_p.add_argument("--until", help="RFC3339 timestamp — only clips created before this")
+    fetch_clips_p.add_argument("--out", help="also write the fetched list as JSON to this path")
+
     args = parser.parse_args(argv)
 
     if args.command == "select":
         from .select import select
 
         out = select(args.video_id, force=args.force)
+        for seg in out["segments"]:
+            vo = seg["vo_script"] or "(no VO)"
+            print(
+                f"[{seg['n']}] {seg['start']:.1f}-{seg['end']:.1f}s  "
+                f"{seg['tone']:<9} conf={seg['confidence']:.2f}  {seg['caption_title']}\n"
+                f"    {vo}"
+            )
+        print(f"\n{len(out['segments'])} segment(s)")
+
+    elif args.command == "select-clip":
+        from .select import select_clip
+
+        out = select_clip(args.video_id, force=args.force)
         for seg in out["segments"]:
             vo = seg["vo_script"] or "(no VO)"
             print(
@@ -192,9 +241,17 @@ def main(argv: list[str] | None = None) -> None:
             start, end, tone, vo_kwargs, loopable = args.start, args.end, args.tone, {}, False
         else:
             from .narrate import narrate
-            from .select import select
+            from .select import select, select_clip
+            from .twitch import is_twitch_clip_url
 
-            select(video_id, force=args.force)
+            # A Twitch clip is already a curated, fixed-boundary moment — the
+            # window-hunting path (select) would be wasted effort on it (see
+            # CLAUDE.md step 2b). Detected from the URL's own shape, not a
+            # flag, so this never needs remembering to pass anything extra.
+            if is_twitch_clip_url(args.url):
+                select_clip(video_id, force=args.force)
+            else:
+                select(video_id, force=args.force)
             narrate(video_id, force=args.force)
             seg = _segment_from_file(video_id, args.n)
             start, end, tone = float(seg["start"]), float(seg["end"]), str(seg["tone"])
@@ -253,6 +310,39 @@ def main(argv: list[str] | None = None) -> None:
                 f"{clip['platform']}  {clip['source_url']}"
             )
         print(f"\n{len(manifest['clips'])} clip(s) — screen thumbnails before use")
+
+    elif args.command == "fetch-clips":
+        from .twitch import fetch_clips, get_app_access_token, get_broadcaster_id
+
+        client_id = os.environ.get("TWITCH_CLIENT_ID")
+        if not client_id:
+            raise SystemExit(
+                "clipper: TWITCH_CLIENT_ID not set in .env (see .env.example) — "
+                "register an app at dev.twitch.tv/console/apps"
+            )
+        token = get_app_access_token(client_id=client_id)
+        broadcaster_id = get_broadcaster_id(args.channel, token=token, client_id=client_id)
+        clips = fetch_clips(
+            broadcaster_id,
+            token=token,
+            client_id=client_id,
+            limit=args.limit,
+            started_at=args.since,
+            ended_at=args.until,
+        )
+        for c in clips:
+            print(
+                f"{c['id']:<28} views={c['view_count']:>8,}  {c['created_at']}  "
+                f"{c['duration']:>4.0f}s  {c['title'][:55]}"
+            )
+        print(f"\n{len(clips)} clip(s) for {args.channel} — nothing downloaded yet")
+        if args.out:
+            from pathlib import Path
+
+            Path(args.out).write_text(
+                json.dumps({"channel": args.channel, "clips": clips}, indent=2)
+            )
+            print(f"wrote {args.out}")
 
     else:  # argparse enforces required=True, but be explicit rather than silent.
         parser.error(f"unknown command {args.command!r}")

@@ -22,6 +22,11 @@ reaches segments.json:
 Everything except `_call_model` is pure and unit-testable without network.
 Caching is load-bearing: segments.json is never regenerated unless `force`, so
 re-running stage 4 fifty times never re-calls the LLM.
+
+`select_clip()` is the stage 3 variant for a single pre-selected clip (Twitch
+clips — CLAUDE.md step 2b): no windowing, one call against
+prompts/select_clip.md, boundaries already given rather than searched for —
+but the exact same validate_segment() and output schema as above.
 """
 
 from __future__ import annotations
@@ -545,4 +550,88 @@ def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
     out = {"video_id": video_id, "segments": final}
     segments_path.write_text(json.dumps(out, indent=2))
     log.info("select: wrote %d segments to %s", len(final), segments_path)
+    return out
+
+
+def select_clip(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
+    """Stage 3 variant for a single pre-selected clip (Twitch clips — CLAUDE.md
+    step 2b), not a long-form video. No window-hunting: one LLM call against
+    prompts/select_clip.md over the clip's entire transcript, whose boundaries
+    are already given rather than searched for. Same output schema and the
+    same validate_segment() as the long-form path — snap-to-word, the payoff-
+    quote coverage check, the hard 18-58s range, and the last-third punchline
+    rule all apply completely unchanged.
+
+    A clip below MIN_DURATION is rejected before ever calling the model —
+    there's nothing to trim up to, so the call would be pure waste.
+    """
+    wd = work_dir(video_id)
+    words_path = wd / "words.json"
+    segments_path = wd / "segments.json"
+
+    if not words_path.exists():
+        raise FileNotFoundError(
+            f"select_clip: {words_path} missing — run stage 2 (transcribe) first."
+        )
+
+    if segments_path.exists() and not force:
+        log.info("select_clip: cache hit for %s (%s), skipping the LLM", video_id, segments_path)
+        return json.loads(segments_path.read_text())
+
+    payload = json.loads(words_path.read_text())
+    words = payload.get("words", [])
+    if not words:
+        raise ValueError(f"select_clip: {words_path} has no words")
+
+    clip_duration = float(payload.get("duration") or words[-1]["end"])
+    if clip_duration < MIN_DURATION:
+        log.warning(
+            "select_clip: %s is %.1fs, under the %.0fs floor — nothing to trim up to, rejecting "
+            "without calling the model",
+            video_id,
+            clip_duration,
+            MIN_DURATION,
+        )
+        out = {"video_id": video_id, "segments": []}
+        segments_path.write_text(json.dumps(out, indent=2))
+        return out
+
+    template = (PROMPTS_DIR / "select_clip.md").read_text()
+    meta = _source_metadata(wd)
+
+    import anthropic  # imported lazily so the pure helpers stay import-light
+
+    client = anthropic.Anthropic()
+
+    prompt = render_prompt(
+        template,
+        window_index="1",
+        window_total="1",
+        window_start=format_hmmss(0.0),
+        window_end=format_hmmss(clip_duration),
+        transcript_window=render_transcript(words),
+        **meta,
+    )
+    log.info(
+        "select_clip: %s (%.1fs, %d words) -> 1 LLM call to %s",
+        video_id,
+        clip_duration,
+        len(words),
+        model,
+    )
+    response = _call_model(client, prompt, model)
+    raw_segments = response.get("segments", [])
+
+    collected: list[dict] = []
+    for raw in raw_segments:
+        seg = validate_segment(raw, words)
+        if seg is not None:
+            collected.append(seg)
+
+    for n, seg in enumerate(collected):
+        seg["n"] = n
+
+    out = {"video_id": video_id, "segments": collected}
+    segments_path.write_text(json.dumps(out, indent=2))
+    log.info("select_clip: wrote %d segment(s) to %s", len(collected), segments_path)
     return out
