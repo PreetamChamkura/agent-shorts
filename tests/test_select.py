@@ -11,7 +11,7 @@ from clipper.select import (
     _snap_end_forward,
     build_windows,
     dedupe,
-    format_mmss,
+    format_hmmss,
     parse_timestamps,
     render_prompt,
     render_transcript,
@@ -36,15 +36,18 @@ def _words(n=60, step=1.0, start=0.0):
 # --- formatting / windowing -------------------------------------------------
 
 
-def test_format_mmss():
-    assert format_mmss(0) == "00:00"
-    assert format_mmss(75.4) == "01:15"
-    assert format_mmss(3661) == "61:01"  # minutes keep counting past an hour
+def test_format_hmmss():
+    assert format_hmmss(0) == "0:00:00"
+    assert format_hmmss(75.4) == "0:01:15"
+    assert format_hmmss(3661) == "1:01:01"
+    # A 12-hour livestream marker stays small-field h:mm:ss, never a
+    # 3-digit minute count the model would have to multiply out.
+    assert format_hmmss(43200) == "12:00:00"
 
 
 def test_render_transcript_inserts_markers():
     out = render_transcript(_words(40), marker_interval=15.0)
-    assert "[00:00]" in out and "[00:15]" in out and "[00:30]" in out
+    assert "[0:00:00]" in out and "[0:00:15]" in out and "[0:00:30]" in out
     assert "w0" in out and "w39" in out
 
 

@@ -44,7 +44,7 @@ MAX_TOKENS = 8000
 # it produces are removed by _dedupe.
 WINDOW_SECONDS = 480.0
 WINDOW_OVERLAP = 30.0
-MARKER_INTERVAL = 15.0  # [mm:ss] markers, per prompts/select.md
+MARKER_INTERVAL = 15.0  # [h:mm:ss] markers, per prompts/select.md
 
 MIN_DURATION = 18.0
 MAX_DURATION = 58.0
@@ -111,14 +111,26 @@ _RESPONSE_SCHEMA = {
 }
 
 
-def format_mmss(seconds: float) -> str:
-    """Seconds -> `mm:ss` (minutes keep counting past 60)."""
+def format_hmmss(seconds: float) -> str:
+    """Seconds -> `h:mm:ss` (hours unpadded, uncapped).
+
+    Was `mm:ss` with minutes counting past 60 — mathematically fine, but a
+    12-hour livestream produced markers like [720:00], and asking the model
+    to convert a 3-digit minute count to seconds (multiply by 60, add the
+    remainder) is exactly the kind of arithmetic step that introduces drift
+    at scale. h:mm:ss keeps every field small (the hour count is the only
+    one that grows, and it grows slowly) so the conversion the model has to
+    do for `start`/`end`/`punchline_at` stays low-risk regardless of source
+    length.
+    """
     total = int(max(0.0, seconds))
-    return f"{total // 60:02d}:{total % 60:02d}"
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"
 
 
 def render_transcript(words: list[dict], marker_interval: float = MARKER_INTERVAL) -> str:
-    """Transcript text with `[mm:ss]` markers roughly every ``marker_interval``.
+    """Transcript text with `[h:mm:ss]` markers roughly every ``marker_interval``.
 
     Markers are absolute within the full video — segments must come back in
     absolute seconds, not window-relative.
@@ -131,7 +143,7 @@ def render_transcript(words: list[dict], marker_interval: float = MARKER_INTERVA
     for w in words:
         ws = float(w["start"])
         while ws >= next_marker:
-            parts.append(f"[{format_mmss(next_marker)}]")
+            parts.append(f"[{format_hmmss(next_marker)}]")
             next_marker += marker_interval
         parts.append(str(w["word"]))
     return " ".join(parts)
@@ -500,8 +512,8 @@ def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
             template,
             window_index=str(win["index"]),
             window_total=str(win["total"]),
-            window_start=format_mmss(win["start"]),
-            window_end=format_mmss(win["end"]),
+            window_start=format_hmmss(win["start"]),
+            window_end=format_hmmss(win["end"]),
             transcript_window=render_transcript(win["words"]),
             **meta,
         )
@@ -509,8 +521,8 @@ def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
             "select: window %d/%d (%s-%s), %d words",
             win["index"],
             win["total"],
-            format_mmss(win["start"]),
-            format_mmss(win["end"]),
+            format_hmmss(win["start"]),
+            format_hmmss(win["end"]),
             len(win["words"]),
         )
         payload = _call_model(client, prompt, model)

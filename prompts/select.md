@@ -9,7 +9,7 @@ Description: {video_description_first_500_chars}
 
 ## Transcript window
 
-Window {window_index} of {window_total}, covering {window_start} to {window_end}. Timestamps in [mm:ss] appear roughly every 15 seconds.
+Window {window_index} of {window_total}, covering {window_start} to {window_end}. Timestamps in [h:mm:ss] appear roughly every 15 seconds — e.g. [1:15:45] is 1 hour, 15 minutes, 45 seconds (4545s absolute), not "115 minutes."
 
 {transcript_window}
 
@@ -22,7 +22,7 @@ A moment qualifies only if all are true:
 - Comprehensible to someone who hasn't seen the rest of the video. No dangling pronouns pointing outside the window, no callbacks to jokes established elsewhere
 - Has beat structure: something builds, then something lands. A single funny sentence with no setup is not a clip
 - The payoff falls in the last third. If the best moment is at the start, move the boundaries so it isn't
-- Runs 18-58 seconds inclusive
+- Runs 18-58 seconds inclusive. Within that range, prefer 25-40 seconds unless the content genuinely needs more room to complete its setup-to-payoff arc — don't pad a tight moment out to 40s, and don't force a beat that naturally needs 45-50s into a shorter cut and lose the payoff. This is a soft preference: the 18-58s range above and the reject-rather-than-pad rule are what actually gate a segment
 
 Reject without exception:
 - Crosstalk with no discernible point
