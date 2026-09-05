@@ -209,8 +209,10 @@ Gameplay audio is always discarded. Gameplay video comes from `assets/gameplay/*
 ## Voiceover mixing
 
 - Stage 3.5 calls TTS with `vo_script`. Cache by sha256 of the script text. Never pay twice for the same line.
-- `vo_placement`: `cold_open` starts at t=0. `pre_punchline` starts 1.2s before `punchline_at`.
-- Duck the source under VO, don't mute: `volume=0.35:enable='between(t,{vo_start},{vo_end})'` on source, then `amix`, then `loudnorm` on the mixed result. Never loudnorm before mixing.
+- Two overlapping voices don't work at any relative volume — VO and source speech are never audible at the same time. Behavior splits by `vo_placement`:
+  - `cold_open`: an actual pre-roll. Freeze on the clip's first frame (dimmed and blurred) for the VO's duration, source audio fully silent, then cut to full clip playback and full source audio once narration ends. The VO plays before the clip starts, not under it — this lengthens the final render by the VO's duration, which still counts toward the 18-58s duration bound.
+  - `pre_punchline`: full silence on the source track during the VO window (`volume=0`, not ducked), resuming full volume immediately after. Short enough that a hard cut to silence and back isn't jarring.
+- `amix` the VO into the silenced window (`pre_punchline`) or concatenate it ahead of the clip (`cold_open`), then `loudnorm` on the result. Never loudnorm before mixing or concatenating.
 - `vo_script: null` is a normal path, not an error. Render with no VO track.
 - If TTS fails, render without VO and flag it in segments.json rather than failing the job.
 
