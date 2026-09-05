@@ -6,9 +6,10 @@ isolation. Times in the word list are clip-relative seconds (the render stage
 shifts absolute transcript times before calling this).
 
 Layout, colours, and the per-word highlight animation follow the "ASS captions"
-section of CLAUDE.md exactly. One Dialogue line per word; the full phrase group
-stays on screen and the active word recolours to the tone highlight while it
-scales 118% -> 100% over 90ms.
+section of CLAUDE.md exactly. One Dialogue line per word; the phrase group
+builds up progressively as each word is spoken (a word never renders — not
+even unhighlighted — before its own start time) and the active word recolours
+to the tone highlight while it scales 118% -> 100% over 90ms.
 """
 
 from __future__ import annotations
@@ -144,13 +145,19 @@ def build_ass(
     lines: list[str] = []
     for group in group_words(words, group_size):
         for i, w in enumerate(group):
-            # Keep the whole phrase visible: this word's line runs until the next
-            # word starts; the last word runs to its own end.
+            # Keep spoken-so-far words visible: this word's line runs until
+            # the next word starts; the last word runs to its own end.
             start = float(w["start"])
             end = float(group[i + 1]["start"]) if i + 1 < len(group) else float(w["end"])
             if end < start:
                 end = start
-            text = _dialogue_text(group, i, highlight, uppercase)
+            # Only words spoken so far (0..i) render at all — a word must
+            # not appear on screen, even unhighlighted, before its own start
+            # time. Passing the full group here was the bug: whenever a
+            # group's first word was followed by a real gap in natural
+            # speech, words 2/3 sat on screen for that whole gap before
+            # either was actually said.
+            text = _dialogue_text(group[: i + 1], i, highlight, uppercase)
             lines.append(
                 f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(end)},"
                 f"{style_name},,0,0,0,,{text}"

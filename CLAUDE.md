@@ -161,7 +161,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 - Outline 9 / shadow 5 keeps text legible over any footage. Don't reduce
 - Timestamps `H:MM:SS.cc`, single-digit hour
 
-One Dialogue line per word. The full phrase shows; the active word recolors to the tone's highlight and scales 118% easing to 100% over 90ms.
+One Dialogue line per word. The phrase builds up progressively as each word is spoken — a word must never appear on screen, even unhighlighted, before its own start time, since natural speech leaves real gaps between words that would otherwise show later words early. The active word recolors to the tone's highlight and scales 118% easing to 100% over 90ms.
 
 ```
 {\c&H0000E5FF&\fscx118\fscy118\t(0,90,\fscx100\fscy100)}WORD

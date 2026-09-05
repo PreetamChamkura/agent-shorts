@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from clipper.ass import build_ass, format_ass_time, group_words
 
 
@@ -87,6 +89,54 @@ def test_build_ass_phrase_stays_visible():
     first = next(ln for ln in out.splitlines() if ln.startswith("Dialogue:"))
     # first word 0.00 -> next word start 0.30
     assert ",0:00:00.00,0:00:00.30," in first
+
+
+def test_build_ass_word_not_visible_before_its_own_start():
+    # Regression: a group's later words must not render — not even
+    # unhighlighted — before their own spoken time. A real gap between
+    # words (natural speech) used to leave them sitting on screen early.
+    group = [
+        {"word": "Hey,", "start": 0.0, "end": 0.36},
+        {"word": "what's", "start": 3.54, "end": 3.60},
+        {"word": "going", "start": 3.60, "end": 3.72},
+    ]
+    out = build_ass(group, 3)
+    dialogues = [ln for ln in out.splitlines() if ln.startswith("Dialogue:")]
+
+    # First line spans the whole 3.54s gap before "what's" is spoken —
+    # neither later word may appear in its text at all.
+    first = dialogues[0]
+    assert ",0:00:00.00,0:00:03.54," in first
+    assert "WHAT'S" not in first
+    assert "GOING" not in first
+    assert "HEY," in first
+
+    # Second line begins exactly when "what's" is spoken, and now shows
+    # both words spoken so far, but not the third.
+    second = dialogues[1]
+    assert ",0:00:03.54,0:00:03.60," in second
+    assert "HEY," in second
+    assert "WHAT'S" in second
+    assert "GOING" not in second
+
+    # Third line: all three words now spoken, all visible.
+    third = dialogues[2]
+    assert "HEY," in third and "WHAT'S" in third and "GOING" in third
+
+
+def test_build_ass_accumulates_progressively_for_larger_groups():
+    # Same invariant holds for group sizes beyond 3: word i's line must
+    # contain exactly i+1 words (0..i), never more.
+    words = _words()  # 4 words: he, had, no, idea.
+    out = build_ass(words, 4)
+    dialogues = [ln for ln in out.splitlines() if ln.startswith("Dialogue:")]
+    assert len(dialogues) == 4
+    # crude word count per line: split on the plain-text uppercase tokens
+    expected_word_counts = [1, 2, 3, 4]
+    for line, expected in zip(dialogues, expected_word_counts, strict=True):
+        text = line.split(",,", 1)[1]
+        bare = re.sub(r"\{[^}]*\}", "", text)  # strip ASS override tags
+        assert len(bare.split()) == expected
 
 
 def test_build_ass_empty_words():
