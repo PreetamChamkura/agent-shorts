@@ -1,7 +1,8 @@
 """Stage 4 — render.
 
 Reads: work/{video_id}/source.mp4, work/{video_id}/words.json,
-       work/{video_id}/vo_{n}.wav (optional — absent means no VO)
+       work/{video_id}/vo_{n}.wav, work/{video_id}/vo_{n}.words.json
+       (VO files optional — absent means no VO / no VO captions)
 Writes: work/{video_id}/caps_{n}.ass, work/{video_id}/out_{n}.mp4
 
 Three compositions: `tight_crop` (baseline — blur-fill with the subject scaled
@@ -15,14 +16,19 @@ never a silent default for an unknown tone.
 
 VO mixing (CLAUDE.md "Voiceover mixing"): two overlapping voices don't work at
 any relative volume, so VO and source speech are never audible at the same
-time — behavior splits by `vo_placement`. `cold_open` gets an actual pre-roll:
-a freeze on the clip's first frame (dimmed + blurred) for the VO's duration,
-source silent, then a cut to live clip + full audio — the VO plays *before*
-the clip, not under it, which also lengthens the final render by the VO's
-duration. `pre_punchline` hard-cuts the source to silence for the VO's window
-(not ducked) and resumes full volume immediately after. Passing neither
-`punchline_at` nor `vo_placement` means no VO — the normal path when
-vo_script was null or TTS failed.
+time — but the *video* never freezes for it, a static frame is dead time on
+Shorts/Reels. Both placements are the same audio shape: the source cuts to
+full silence (not ducked) for the VO's window while the video keeps playing
+normally, VO plays at full volume, then resumes full source audio after. Only
+where the window sits differs — `cold_open` at t=0 (the clip's own opening
+seconds), `pre_punchline` 1.2s before the punchline. `cold_open` additionally
+captions the VO's own line during its window with the same karaoke engine as
+the rest of the clip (real per-word timing from a whisper transcription of
+the VO audio, not an invented one — see narrate.py), since the viewer should
+be able to read what the narrator is saying, not just hear it; `pre_punchline`
+doesn't, it's a short interjection. Passing neither `punchline_at` nor
+`vo_placement` means no VO — the normal path when vo_script was null or TTS
+failed.
 
 Loop hold (CLAUDE.md: a `loopable` segment must end cleanly on the last frame
 so a platform's auto-repeat reads as seamless): when the caller passes
@@ -99,6 +105,41 @@ def _clip_words(words: list[dict], start: float, end: float) -> list[Word]:
     return out
 
 
+_ASS_EVENTS_FORMAT_LINE = "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
+
+
+def _merge_vo_and_clip_captions(
+    vo_words: list[Word],
+    clip_words: list[Word],
+    vo_duration: float,
+    group_size: int,
+    style: dict[str, object],
+) -> str:
+    """Caption a cold_open VO window with the karaoke engine, then resume the
+    clip's own captions once it ends — one ASS file, built from two separate
+    build_ass() calls whose Dialogue lines are concatenated. Reuses the
+    existing caption engine as-is rather than adding a phrase-grouping
+    special case: calling it twice and stitching the [Events] sections
+    guarantees a group never straddles the VO/clip boundary, which relying on
+    the VO's last word happening to end in sentence punctuation would not.
+
+    Clip words starting before ``vo_duration`` are dropped — that dialogue is
+    silenced during the VO window, so captioning it would show text for audio
+    the viewer can't hear.
+    """
+    resumed_clip_words = [w for w in clip_words if w["start"] >= vo_duration]
+    vo_ass = build_ass(vo_words, group_size, style)
+    clip_ass = build_ass(resumed_clip_words, group_size, style)
+
+    header, _, vo_body = vo_ass.partition(_ASS_EVENTS_FORMAT_LINE)
+    _, _, clip_body = clip_ass.partition(_ASS_EVENTS_FORMAT_LINE)
+
+    combined_body = (vo_body.rstrip("\n") + "\n" + clip_body.rstrip("\n")).strip("\n")
+    if not combined_body:
+        return header + _ASS_EVENTS_FORMAT_LINE
+    return f"{header}{_ASS_EVENTS_FORMAT_LINE}{combined_body}\n"
+
+
 def _caption_and_watermark_tail(
     comp_label: str, ass_path: str, fonts_dir: str, wm_font: str
 ) -> str:
@@ -119,8 +160,7 @@ def _caption_and_watermark_tail(
 
 def _blur_fill_video() -> str:
     """Video-only chain, ending in [comp]. Caption/watermark tail and audio
-    are assembled separately by render() so a cold_open pre-roll can splice
-    in between this and the tail."""
+    are assembled separately by render()."""
     return (
         "[0:v]split=2[bg][fg];"
         "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
@@ -165,44 +205,25 @@ def _split_screen_video() -> str:
     )
 
 
-def _freeze_preroll_video(vo_duration: float) -> str:
-    """Freeze [comp]'s first frame (dimmed + blurred) for vo_duration seconds,
-    then cut to live [comp] footage. Produces [precomp].
-
-    [comp] is consumed twice below (once frozen, once live) — that needs an
-    explicit `split`; reusing a filter label as input to two different
-    filters isn't valid fan-out on its own and silently produces a bogus
-    default-parameter stream for one consumer instead of an error.
-
-    cold_open VO plays *before* the clip starts, not under it — two
-    overlapping voices don't work at any relative volume (CLAUDE.md).
-    """
-    return (
-        "[comp]split=2[compA][compB];"
-        f"[compA]loop=loop=-1:size=1:start=0,trim=duration={vo_duration:.3f},"
-        "setpts=PTS-STARTPTS,eq=brightness=-0.2,gblur=sigma=12[frozen];"
-        "[frozen][compB]concat=n=2:v=1:a=0[precomp]"
-    )
-
-
 def _pre_punchline_start_seconds(clip_start: float, punchline_at: float) -> float:
     """Clip-relative VO start second for pre_punchline: 1.2s before
     punchline_at, clamped to 0 so a punchline near the very start of the clip
-    can't ask for a negative start time. cold_open has no equivalent — it
-    prepends a pre-roll instead of overlaying a point in the clip's timeline.
+    can't ask for a negative start time.
     """
     return max(0.0, (punchline_at - clip_start) - 1.2)
 
 
 def _audio_tail(vo: dict | None) -> str:
-    """Shared audio tail for the no-VO and pre_punchline cases.
+    """Shared audio tail for every case: no VO, cold_open, and pre_punchline
+    are all the same shape now.
 
-    No VO: plain loudnorm. pre_punchline: the source cuts to full silence
-    (not ducked — two overlapping voices don't work at any relative volume)
-    for the VO's window, VO plays at full volume, then amix, then loudnorm on
-    the *mixed* result — never before mixing (CLAUDE.md). cold_open doesn't
-    use this function; see _cold_open_audio_tail + _freeze_preroll_video,
-    since there the VO precedes the clip rather than overlapping it.
+    No VO: plain loudnorm. Otherwise: the source cuts to full silence (not
+    ducked — two overlapping voices don't work at any relative volume) for
+    the VO's window, VO plays at full volume, then amix, then loudnorm on the
+    *mixed* result — never before mixing (CLAUDE.md). cold_open no longer
+    prepends a pre-roll (its window is just [0, vo_duration) — the clip's own
+    opening seconds), so it needs nothing different from pre_punchline here;
+    only where render() places the window differs.
 
     ``vo``, when present, is {"input_index": int, "start": float, "end": float}
     — the ffmpeg input index of vo_{n}.wav and its clip-relative time window.
@@ -218,34 +239,6 @@ def _audio_tail(vo: dict | None) -> str:
         "[silenced][vodelayed]amix=inputs=2:duration=first:dropout_transition=0,"
         "loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
     )
-
-
-def _cold_open_audio_tail(vo_input_index: int) -> str:
-    """VO plays to completion in silence, then the clip's own audio at full
-    volume — a sequential concat, not a mix, since cold_open VO precedes the
-    clip rather than overlapping it. aformat normalizes both streams to the
-    same rate/layout first since concat (unlike amix) requires matching
-    formats.
-    """
-    return (
-        f"[{vo_input_index}:a]aformat=sample_rates=48000:channel_layouts=stereo[voa];"
-        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo[srca];"
-        "[voa][srca]concat=n=2:v=0:a=1,loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
-    )
-
-
-def _shift_words(words: list[Word], offset: float) -> list[Word]:
-    """Shift every word's start/end by ``offset`` seconds.
-
-    Used when a cold_open pre-roll prepends ``offset`` seconds of frozen
-    frame ahead of the clip — captions must land on the real clip content
-    once it starts, not during the pre-roll.
-    """
-    if offset == 0.0:
-        return words
-    return [
-        {"word": w["word"], "start": w["start"] + offset, "end": w["end"] + offset} for w in words
-    ]
 
 
 def _snap_loop_end_forward(words: list[dict], raw_end: float) -> float:
@@ -534,47 +527,70 @@ def render(
 
     # VO opts in only when both fields are given AND stage 3.5 actually left a
     # file — vo_script null or a flagged tts_failed means neither is passed,
-    # which is the normal, expected no-VO path. Shape differs by placement:
-    # cold_open only needs its own duration (it prepends a pre-roll rather
-    # than overlaying a point in the clip), pre_punchline needs a window.
+    # which is the normal, expected no-VO path. Both placements are the same
+    # shape now: a silence-and-mix window on the source's own timeline. Only
+    # *where* the window sits differs — cold_open at t=0 (the clip's own
+    # opening), pre_punchline 1.2s before the punchline.
     vo_path = wd / f"vo_{n}.wav"
     vo = None
     if punchline_at is not None and vo_placement is not None and vo_path.exists():
         vo_input_index = len(input_args) // 4  # each existing input is a "-ss value -i path" run
         input_args += ["-i", str(vo_path)]
         vo_duration = probe_duration(str(vo_path))
-        if vo_placement == "cold_open":
-            vo = {"input_index": vo_input_index, "placement": "cold_open", "duration": vo_duration}
-            log.info("render: cold_open VO n=%d, %.2fs pre-roll", n, vo_duration)
-        else:
-            vo_start = _pre_punchline_start_seconds(start, punchline_at)
-            vo = {
-                "input_index": vo_input_index,
-                "placement": "pre_punchline",
-                "start": vo_start,
-                "end": vo_start + vo_duration,
-            }
-            log.info(
-                "render: pre_punchline VO n=%d, silence window %.2fs-%.2fs",
-                n,
-                vo_start,
-                vo_start + vo_duration,
-            )
+        vo_start = (
+            0.0
+            if vo_placement == "cold_open"
+            else _pre_punchline_start_seconds(start, punchline_at)
+        )
+        vo = {
+            "input_index": vo_input_index,
+            "placement": vo_placement,
+            "start": vo_start,
+            "end": vo_start + vo_duration,
+        }
+        log.info(
+            "render: %s VO n=%d, silence window %.2fs-%.2fs",
+            vo_placement,
+            n,
+            vo_start,
+            vo_start + vo_duration,
+        )
 
-    # cold_open prepends vo["duration"] seconds of frozen pre-roll ahead of
-    # the clip, so captions (timed relative to the clip) must shift by the
-    # same amount to still land on the real footage once it starts.
-    caption_offset = vo["duration"] if vo and vo["placement"] == "cold_open" else 0.0
-    clip_words = _shift_words(_clip_words(words, start, end), caption_offset)
-    ass_text = build_ass(clip_words, group_size, style_overrides)
+    clip_words = _clip_words(words, start, end)
+
+    # A cold_open VO plays over the clip's own opening seconds (muted, video
+    # keeps moving — CLAUDE.md) rather than a prepended pre-roll, so it gets
+    # captioned too: the viewer should be able to read the line, not just
+    # hear it. Reuses build_ass twice (via _merge_vo_and_clip_captions) —
+    # existing infrastructure, not a new mechanism. Falls back to the plain
+    # clip captions if vo_{n}.words.json isn't there (e.g. a line synthesized
+    # before this existed and not yet backfilled by narrate()).
+    vo_words_path = wd / f"vo_{n}.words.json"
+    if vo and vo["placement"] == "cold_open" and vo_words_path.exists():
+        vo_words = json.loads(vo_words_path.read_text())["words"]
+        ass_text = _merge_vo_and_clip_captions(
+            vo_words, clip_words, vo["end"], group_size, style_overrides
+        )
+        log.info(
+            "render: wrote %s (%d VO + %d clip caption words, tone=%s, group_size=%d)",
+            ass_path,
+            len(vo_words),
+            len(clip_words),
+            tone,
+            group_size,
+        )
+    else:
+        if vo and vo["placement"] == "cold_open":
+            log.info("render: n=%d cold_open with no vo_%d.words.json — captioning clip only", n, n)
+        ass_text = build_ass(clip_words, group_size, style_overrides)
+        log.info(
+            "render: wrote %s (%d caption words, tone=%s, group_size=%d)",
+            ass_path,
+            len(clip_words),
+            tone,
+            group_size,
+        )
     ass_path.write_text(ass_text)
-    log.info(
-        "render: wrote %s (%d caption words, tone=%s, group_size=%d)",
-        ass_path,
-        len(clip_words),
-        tone,
-        group_size,
-    )
 
     if composition == "blur_fill":
         video_fc = _blur_fill_video()
@@ -583,17 +599,8 @@ def render(
     else:  # split_screen
         video_fc = _split_screen_video()
 
-    if vo and vo["placement"] == "cold_open":
-        video_fc = f"{video_fc};{_freeze_preroll_video(vo['duration'])}"
-        comp_label = "precomp"
-        audio_fc = _cold_open_audio_tail(vo["input_index"])
-        total_duration = duration + vo["duration"]
-    else:
-        comp_label = "comp"
-        audio_fc = _audio_tail(vo)
-        total_duration = duration
-
-    tail = _caption_and_watermark_tail(comp_label, str(ass_path), fonts_dir, wm_font)
+    audio_fc = _audio_tail(vo)
+    tail = _caption_and_watermark_tail("comp", str(ass_path), fonts_dir, wm_font)
     fc = f"{video_fc};{tail};{audio_fc}"
 
     run_ffmpeg(
@@ -601,7 +608,7 @@ def render(
             "-y",
             *input_args,
             "-t",
-            f"{total_duration}",
+            f"{duration}",
             "-filter_complex",
             fc,
             "-map",

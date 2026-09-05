@@ -1,34 +1,40 @@
 """Stage 3.5 — narrate (TTS).
 
 Reads: work/{video_id}/segments.json
-Writes: work/{video_id}/vo_{n}.wav (absent when vo_script is null)
+Writes: work/{video_id}/vo_{n}.wav, work/{video_id}/vo_{n}.words.json
+        (both absent when vo_script is null)
 
 OpenAI TTS via the plain /v1/audio/speech REST endpoint. One voice,
 permanently (CLAUDE.md narrator persona) — NARRATOR_VOICE/NARRATOR_MODEL are
 the only place that changes.
 
 Caching is two-tier and `force` only affects the outer one:
-  - content cache: work/_tts_cache/{sha256(vo_script)}.wav, shared across every
-    video. Consulted before every call and NEVER bypassed by --force — CLAUDE.md
-    is explicit that identical text must never be paid for twice.
-  - per-video cache: vo_{n}.wav. --force only re-copies from the content cache
-    (or re-synthesizes if that's also missing); it does not re-pay for text
-    already cached.
+  - content cache: work/_tts_cache/{sha256(vo_script)}.wav (+ .words.json),
+    shared across every video. Consulted before every call and NEVER
+    bypassed by --force — CLAUDE.md is explicit that identical text must
+    never be paid for twice.
+  - per-video cache: vo_{n}.wav / vo_{n}.words.json. --force only re-copies
+    from the content cache (or re-synthesizes if that's also missing); it
+    does not re-pay for text already cached.
+
+vo_{n}.words.json is a whisper transcription of the synthesized line itself
+(clipper.transcribe.transcribe_audio_file — the same wrapper stage 2 uses) —
+real per-word timing, not an invented even-split, so render() can caption a
+cold_open VO with the existing karaoke engine on its own actual timing.
+Backfilled from the content-cache audio for any line that predates this
+feature — never by re-calling TTS, only ever from audio already paid for.
 
 If TTS fails, that segment is flagged `tts_failed: true` in segments.json and
 left without a vo_{n}.wav — render() then renders without VO rather than
 failing the whole job.
 
-A `cold_open` VO also gets a duration-fit check: its pre-roll lengthens the
-final render by the VO's own length (CLAUDE.md), and CLAUDE.md's 18-58s
-output bound is non-negotiable — "hard fail outside", not something a render
-should quietly exceed. If clip_duration + vo_duration would blow that ceiling,
-the segment is flagged `vo_duration_exceeded: true` and left without a
-vo_{n}.wav, exactly like a TTS failure — render() then proceeds without VO
-rather than producing (and only then discovering) an out-of-spec file. This
-is re-checked even on an already-cached vo_{n}.wav, since the fit depends on
-the segment's own start/end, not on whether synthesis happened this run.
-`pre_punchline` never lengthens the render, so it has no such constraint.
+cold_open no longer prepends a pre-roll (CLAUDE.md): the source video keeps
+playing, just muted, under the VO, so it no longer lengthens the render. The
+only way a cold_open VO still can't be used is if it's long enough to consume
+the clip's own duration outright; that's flagged `vo_duration_exceeded` and
+handled exactly like a TTS failure. Re-checked even on an already-cached
+vo_{n}.wav, since the fit depends on the segment's own start/end, not on
+whether synthesis happened this run. `pre_punchline` is unaffected either way.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ import requests
 
 from .ffmpeg import probe_duration
 from .paths import TTS_CACHE_DIR, work_dir
+from .transcribe import transcribe_audio_file
 
 log = logging.getLogger("clipper.narrate")
 
@@ -52,43 +59,59 @@ NARRATOR_VOICE = "echo"  # picked by ear from an onyx/echo/fable audition — ne
 RESPONSE_FORMAT = "wav"
 TIMEOUT = 60.0
 
-# Mirrors render.py's (and select.py's) MAX_DURATION — duplicated rather than
-# imported, per CLAUDE.md's stage-independence contract; see render.py's
-# _snap_loop_end_forward for the same tradeoff made the same way.
-MAX_DURATION = 58.0
+# A cold_open VO overlays the clip's own opening seconds rather than
+# prepending time now, so it must leave at least this much of the clip's own
+# content after it ends — a VO that eats the whole clip isn't a cold open,
+# it's the entire video.
+MIN_CLIP_AFTER_VO = 3.0
 
 
 def script_hash(vo_script: str) -> str:
     return hashlib.sha256(vo_script.encode("utf-8")).hexdigest()
 
 
-def _check_duration_fit(seg: dict, vo_path: Path) -> bool:
-    """For a cold_open VO, confirm clip_duration + vo_duration still fits the
-    18-58s bound; if not, delete vo_path (never the content cache — the line
-    itself is still fine, just not usable as a pre-roll on this segment) and
-    flag the segment so render() proceeds without VO. Returns True if it
-    changed the segment dict (caller should persist segments.json).
+def _ensure_words_cache(cache_audio_path: Path, cache_words_path: Path) -> None:
+    """Backfill the content-cache's word-timing file for one VO line, if
+    missing. Runs at most once per unique line, ever — cached like the audio,
+    and only ever called when the audio is already sitting in the content
+    cache, so this never triggers a fresh TTS call.
+    """
+    if cache_words_path.exists():
+        return
+    words = transcribe_audio_file(str(cache_audio_path))
+    cache_words_path.write_text(json.dumps(words, indent=2))
+    log.info("narrate: transcribed VO line (%d words) -> %s", len(words["words"]), cache_words_path)
 
-    pre_punchline never changes total duration, so it's never affected here.
+
+def _check_duration_fit(seg: dict, vo_path: Path) -> bool:
+    """For a cold_open VO, confirm it fits inside the clip's own duration.
+
+    cold_open plays over the clip's own opening seconds now (muted, video
+    keeps moving) rather than prepending a pre-roll, so the only way this
+    fails is a VO long enough to consume the clip outright. If it doesn't
+    fit, delete vo_path (never the content cache — the line itself is fine,
+    just not usable as this segment's cold open) and flag the segment so
+    render() proceeds without VO. Returns True if it changed the segment dict.
+
+    pre_punchline never has this constraint — it's a short interjection, not
+    a window at the start of the clip.
     """
     if seg.get("vo_placement") != "cold_open":
         return seg.pop("vo_duration_exceeded", None) is not None
 
     vo_duration = probe_duration(str(vo_path))
     clip_duration = float(seg["end"]) - float(seg["start"])
-    total = clip_duration + vo_duration
 
-    if total <= MAX_DURATION:
+    if vo_duration <= clip_duration - MIN_CLIP_AFTER_VO:
         return seg.pop("vo_duration_exceeded", None) is not None
 
     log.warning(
-        "narrate: n=%d cold_open VO (%.2fs) would push the %.2fs clip to %.2fs, "
-        "over the %.0fs cap — dropping VO for this render, not the cached line",
+        "narrate: n=%d cold_open VO (%.2fs) leaves under %.0fs of the %.2fs "
+        "clip after it — dropping VO for this render, not the cached line",
         seg["n"],
         vo_duration,
+        MIN_CLIP_AFTER_VO,
         clip_duration,
-        total,
-        MAX_DURATION,
     )
     vo_path.unlink(missing_ok=True)
     seg["vo_duration_exceeded"] = True
@@ -137,27 +160,35 @@ def narrate(
         n = seg["n"]
         vo_script = seg.get("vo_script")
         vo_path = wd / f"vo_{n}.wav"
+        vo_words_path = wd / f"vo_{n}.words.json"
 
         if vo_script is None:
             continue  # normal path, not an error — CLAUDE.md
 
         if seg.get("vo_duration_exceeded"):
-            # Already determined this cold_open VO can't fit the 18-58s
-            # bound (see _check_duration_fit) — the segment's own start/end
-            # haven't changed since, so there's nothing new to re-derive.
-            # Not affected by --force: that flag re-copies from the content
-            # cache, it doesn't change whether the result would fit.
+            # Already determined this cold_open VO can't fit the clip's own
+            # duration (see _check_duration_fit) — the segment's own
+            # start/end haven't changed since, so there's nothing new to
+            # re-derive. Not affected by --force: that flag re-copies from
+            # the content cache, it doesn't change whether the VO fits.
             log.info("narrate: n=%d previously exceeded duration cap, skipping", n)
-            continue
-
-        if vo_path.exists() and not force:
-            log.info("narrate: cache hit for n=%d (%s), skipping", n, vo_path)
-            if _check_duration_fit(seg, vo_path):
-                changed = True
             continue
 
         digest = script_hash(vo_script)
         cache_path = TTS_CACHE_DIR / f"{digest}.wav"
+        cache_words_path = TTS_CACHE_DIR / f"{digest}.words.json"
+
+        if vo_path.exists() and not force:
+            log.info("narrate: cache hit for n=%d (%s), skipping", n, vo_path)
+            # Backfill words.json for a line synthesized before this feature
+            # existed — only from audio already in the content cache, never
+            # by calling TTS again.
+            if not vo_words_path.exists() and cache_path.exists():
+                _ensure_words_cache(cache_path, cache_words_path)
+                vo_words_path.write_text(cache_words_path.read_text())
+            if _check_duration_fit(seg, vo_path):
+                changed = True
+            continue
 
         if not cache_path.exists():
             api_key = os.environ.get("TTS_API_KEY")
@@ -176,7 +207,10 @@ def narrate(
         else:
             log.info("narrate: content-cache hit for n=%d (sha256=%s), no TTS call", n, digest[:12])
 
+        _ensure_words_cache(cache_path, cache_words_path)
+
         vo_path.write_bytes(cache_path.read_bytes())
+        vo_words_path.write_text(cache_words_path.read_text())
         seg.pop("tts_failed", None)
         changed = True
         _check_duration_fit(seg, vo_path)

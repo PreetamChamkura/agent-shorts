@@ -33,6 +33,7 @@ work/{video_id}/
   words.json         2    transcribe
   segments.json      3    select
   vo_{n}.wav         3.5  narrate (absent when vo_script is null)
+  vo_{n}.words.json  3.5  narrate, whisper timing for cold_open VO captions (same condition)
   caps_{n}.ass       4    render, kept for debugging
   out_{n}.mp4        4    render
   review.json        5    approve/reject
@@ -211,13 +212,14 @@ Gameplay audio is always discarded. Gameplay video comes from `assets/gameplay/*
 ## Voiceover mixing
 
 - Stage 3.5 calls TTS with `vo_script`. Cache by sha256 of the script text. Never pay twice for the same line.
-- Two overlapping voices don't work at any relative volume — VO and source speech are never audible at the same time. Behavior splits by `vo_placement`:
-  - `cold_open`: an actual pre-roll. Freeze on the clip's first frame (dimmed and blurred) for the VO's duration, source audio fully silent, then cut to full clip playback and full source audio once narration ends. The VO plays before the clip starts, not under it — this lengthens the final render by the VO's duration, which still counts toward the 18-58s duration bound.
-  - `pre_punchline`: full silence on the source track during the VO window (`volume=0`, not ducked), resuming full volume immediately after. Short enough that a hard cut to silence and back isn't jarring.
-- `amix` the VO into the silenced window (`pre_punchline`) or concatenate it ahead of the clip (`cold_open`), then `loudnorm` on the result. Never loudnorm before mixing or concatenating.
+- Two overlapping voices don't work at any relative volume — VO and source speech are never audible at the same time. But the video never freezes for it either: a static frame is dead time, exactly the kind of pause that loses viewers on Shorts/Reels. Both `vo_placement` values share the same mechanism — full silence on the source track during the VO window (`volume=0`, not ducked), source video playing normally throughout, resuming full audio immediately after — differing only in where the window sits:
+  - `cold_open`: the window is `[0, vo_duration)` — the clip's own opening seconds. The source video keeps moving under the narration; nothing is prepended, so this does not lengthen the render.
+  - `pre_punchline`: the window starts 1.2s before `punchline_at`. Short enough that a hard cut to silence and back isn't jarring.
+- `cold_open` additionally captions the VO's own line during its window, with the same karaoke engine and style as the rest of the clip, so the viewer can read the narrator as well as hear them. The timing comes from a whisper transcription of the synthesized VO audio (`vo_{n}.words.json`, stage 3.5 — reusing the same transcription wrapper stage 2 uses, not a new mechanism), not an invented even-split. `pre_punchline` does not caption its VO — it's a short interjection, not a window with room for a second caption track.
+- `amix` the VO into the silenced window, then `loudnorm` on the mixed result. Never loudnorm before mixing.
 - `vo_script: null` is a normal path, not an error. Render with no VO track.
 - If TTS fails, render without VO and flag it in segments.json rather than failing the job.
-- Since `cold_open` lengthens the render, it can push a clip already close to 58s over the hard duration cap. Stage 3.5 checks this once it knows the real synthesized length: if `clip_duration + vo_duration` would exceed 58s, the VO is dropped for that render and the segment is flagged `vo_duration_exceeded` in segments.json — exactly like a TTS failure, never a silent bad render. The cached audio itself is untouched; only this segment's use of it as a pre-roll is unusable.
+- Because `cold_open` no longer lengthens the render, the only way its VO still can't be used is if it's long enough to consume the clip's own duration outright. Stage 3.5 checks this once it knows the real synthesized length; if the VO doesn't leave a few seconds of the clip's own content after it, the VO is dropped for that render and the segment is flagged `vo_duration_exceeded` in segments.json — exactly like a TTS failure, never a silent bad render. The cached audio itself is untouched; only this segment's use of it as a cold open is unusable.
 
 ## Out of scope
 
