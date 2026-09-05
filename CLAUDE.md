@@ -217,6 +217,7 @@ Gameplay audio is always discarded. Gameplay video comes from `assets/gameplay/*
 - `amix` the VO into the silenced window (`pre_punchline`) or concatenate it ahead of the clip (`cold_open`), then `loudnorm` on the result. Never loudnorm before mixing or concatenating.
 - `vo_script: null` is a normal path, not an error. Render with no VO track.
 - If TTS fails, render without VO and flag it in segments.json rather than failing the job.
+- Since `cold_open` lengthens the render, it can push a clip already close to 58s over the hard duration cap. Stage 3.5 checks this once it knows the real synthesized length: if `clip_duration + vo_duration` would exceed 58s, the VO is dropped for that render and the segment is flagged `vo_duration_exceeded` in segments.json — exactly like a TTS failure, never a silent bad render. The cached audio itself is untouched; only this segment's use of it as a pre-roll is unusable.
 
 ## Out of scope
 

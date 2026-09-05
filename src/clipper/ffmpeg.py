@@ -8,6 +8,7 @@ enough stderr to see what happened.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -91,3 +92,12 @@ def run_ffmpeg(args: Sequence[str], *, binary: str = "ffmpeg") -> subprocess.Com
 def run_ffprobe(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     """Convenience wrapper for ffprobe. Same logging and failure semantics."""
     return run_ffmpeg(args, binary="ffprobe")
+
+
+def probe_duration(path: str) -> float:
+    """Duration in seconds of any media file, via ffprobe. Shared across
+    stages (render.py's clip/gameplay/VO probes, narrate.py's duration-fit
+    check) — this is generic infra, not stage-specific behavior, so it lives
+    here rather than being duplicated per stage."""
+    proc = run_ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "json", path])
+    return float(json.loads(proc.stdout)["format"]["duration"])

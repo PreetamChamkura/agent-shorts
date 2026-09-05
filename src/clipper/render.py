@@ -46,7 +46,7 @@ import tempfile
 from pathlib import Path
 
 from .ass import Word, build_ass
-from .ffmpeg import run_ffmpeg, run_ffprobe
+from .ffmpeg import probe_duration, run_ffmpeg, run_ffprobe
 from .paths import CAPTION_FONT, GAMEPLAY_DIR, WATERMARK_FONT, work_dir
 from .styles import style_for_tone
 
@@ -368,11 +368,6 @@ def pick_loop_freeze_end(source: str, clip_end_abs: float) -> float:
         return clip_end_abs
 
 
-def _probe_duration(path: str) -> float:
-    proc = run_ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "json", path])
-    return float(json.loads(proc.stdout)["format"]["duration"])
-
-
 def _pick_gameplay(video_id: str, n: int, needed_duration: float) -> tuple[str, float]:
     """Pick a gameplay file and a start offset, both seeded by {video_id}:{n}.
 
@@ -391,7 +386,7 @@ def _pick_gameplay(video_id: str, n: int, needed_duration: float) -> tuple[str, 
     offset_frac = int.from_bytes(digest[8:16], "big") / float(1 << 64)
 
     chosen = files[file_idx]
-    duration = _probe_duration(str(chosen))
+    duration = probe_duration(str(chosen))
     span = max(0.0, duration - needed_duration)
     offset = round(offset_frac * span, 2)
     return str(chosen), offset
@@ -547,7 +542,7 @@ def render(
     if punchline_at is not None and vo_placement is not None and vo_path.exists():
         vo_input_index = len(input_args) // 4  # each existing input is a "-ss value -i path" run
         input_args += ["-i", str(vo_path)]
-        vo_duration = _probe_duration(str(vo_path))
+        vo_duration = probe_duration(str(vo_path))
         if vo_placement == "cold_open":
             vo = {"input_index": vo_input_index, "placement": "cold_open", "duration": vo_duration}
             log.info("render: cold_open VO n=%d, %.2fs pre-roll", n, vo_duration)
@@ -633,5 +628,13 @@ def render(
         ]
     )
 
-    _validate_output(str(out_path))
+    try:
+        _validate_output(str(out_path))
+    except Exception:
+        # The cache check above trusts "out_path exists" to mean "valid".
+        # ffmpeg already wrote the file by this point even though it fails
+        # validation — leaving it in place would make the *next* run (with
+        # or without --force) silently serve this same invalid file back.
+        out_path.unlink(missing_ok=True)
+        raise
     return str(out_path)

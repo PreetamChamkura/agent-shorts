@@ -92,10 +92,12 @@ def _segment_from_file(video_id: str, n: int) -> dict:
 def _vo_kwargs(seg: dict) -> dict:
     """{"punchline_at", "vo_placement"} when the segment has usable VO, else {}.
 
-    A null vo_script or a stage-3.5 tts_failed flag both mean the normal no-VO
-    path — render() itself also checks that vo_{n}.wav exists before mixing.
+    A null vo_script, a stage-3.5 tts_failed flag, or a vo_duration_exceeded
+    flag (the cold_open pre-roll would push the render past 58s) all mean the
+    normal no-VO path — render() itself also checks that vo_{n}.wav exists
+    before mixing.
     """
-    if seg.get("vo_script") is None or seg.get("tts_failed"):
+    if seg.get("vo_script") is None or seg.get("tts_failed") or seg.get("vo_duration_exceeded"):
         return {}
     return {"punchline_at": float(seg["punchline_at"]), "vo_placement": str(seg["vo_placement"])}
 
@@ -161,6 +163,8 @@ def main(argv: list[str] | None = None) -> None:
                 status = "(no VO)"
             elif seg.get("tts_failed"):
                 status = "TTS FAILED — rendering without VO"
+            elif seg.get("vo_duration_exceeded"):
+                status = "VO EXCEEDS 58s CAP — rendering without VO"
             else:
                 status = f"vo_{seg['n']}.wav"
             print(f"[{seg['n']}] {status}")
