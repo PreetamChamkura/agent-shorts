@@ -76,7 +76,7 @@ Field rules:
 - `punchline_at` must fall in the last third of the segment
 - `why` must name the setup and payoff timestamps **in plain decimal seconds** (e.g. "payoff at 437.1", not "0:07:17.1" — the [h:mm:ss] markers above are transcript landmarks only, not the format for this field) and say what each contains. Vague entries mean the segment wasn't located and will be rejected
 - `confidence` 0.0-1.0, be harsh. 0.9+ means you'd bet it performs. 0.7 is the floor. Below 0.7, omit entirely rather than returning a low score
-- `caption_title`: max 5 words, no emoji, no clickbait phrasing
+- `caption_title`: max 5 words, no emoji, no clickbait phrasing. Write your own from the segment's content — never reuse or lightly edit the source video's own title above, even if it happens to already be clean and short. That title is context, not a draft
 - `vo_placement`: "cold_open" or "pre_punchline"
 - `loopable`: boolean, default `false`. `true` only for a genuinely seamless repeat — most segments should stay `false`
 
