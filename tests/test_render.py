@@ -25,6 +25,10 @@ def test_render_deletes_output_on_validation_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(render_mod, "_check_fonts", lambda: None)
     monkeypatch.setattr(render_mod, "style_for_tone", lambda tone: ({}, 3))
+    # source.mp4 here is fake bytes, not a real video — skip the composition
+    # auto-detect's real face-detection pass (unrelated to what this test
+    # actually checks: cleanup-on-validation-failure).
+    monkeypatch.setattr(render_mod, "find_face_region", lambda *a, **k: None)
 
     def fake_run_ffmpeg(args):
         (wd / "out_0.mp4").write_bytes(b"fake video bytes")
@@ -52,6 +56,7 @@ def test_render_keeps_output_on_success(tmp_path, monkeypatch):
 
     monkeypatch.setattr(render_mod, "_check_fonts", lambda: None)
     monkeypatch.setattr(render_mod, "style_for_tone", lambda tone: ({}, 3))
+    monkeypatch.setattr(render_mod, "find_face_region", lambda *a, **k: None)
     monkeypatch.setattr(
         render_mod, "run_ffmpeg", lambda args: (wd / "out_0.mp4").write_bytes(b"video")
     )

@@ -5,14 +5,19 @@ Reads: work/{video_id}/source.mp4, work/{video_id}/words.json,
        (VO files optional — absent means no VO / no VO captions)
 Writes: work/{video_id}/caps_{n}.ass, work/{video_id}/out_{n}.mp4
 
-Three compositions: `tight_crop` (baseline — blur-fill with the subject scaled
+Four compositions: `tight_crop` (baseline — blur-fill with the subject scaled
 up and center-cropped to fill more vertical space), `blur_fill` (no crop, more
-dead space), and `split_screen` (source panel + gameplay panel per CLAUDE.md —
+dead space), `split_screen` (source panel + gameplay panel per CLAUDE.md —
 available but not tone-wired yet; picking it for "low-motion segments" needs a
 motion signal this pipeline doesn't compute, so it stays a manual --composition
-choice until that lands). Caption style is a lookup on `tone` via
-clipper.styles.style_for_tone — CLAUDE.md's Tone routing table, never random,
-never a silent default for an unknown tone.
+choice until that lands), and `facecam_split` (source's own facecam panel +
+main-content panel — Twitch-clip composition fix, CLAUDE.md step). Unlike
+split_screen, facecam_split IS auto-selected: leaving `composition` unset runs
+clipper.face_detect against the clip's own footage and uses facecam_split only
+when a small corner facecam is actually found there, falling back to
+tight_crop otherwise — see render()'s docstring. Caption style is a lookup on
+`tone` via clipper.styles.style_for_tone — CLAUDE.md's Tone routing table,
+never random, never a silent default for an unknown tone.
 
 VO mixing (CLAUDE.md "Voiceover mixing"): two overlapping voices don't work at
 any relative volume, so VO and source speech are never audible at the same
@@ -52,6 +57,7 @@ import tempfile
 from pathlib import Path
 
 from .ass import Word, build_ass
+from .face_detect import find_face_region, is_small_corner_facecam
 from .ffmpeg import probe_duration, run_ffmpeg, run_ffprobe
 from .frames import mean_abs_diff, read_pgm_gray
 from .paths import CAPTION_FONT, GAMEPLAY_DIR, WATERMARK_FONT, work_dir
@@ -76,7 +82,16 @@ LOOP_FRAME_SIZE = 64
 LOOP_MOTION_THRESHOLD = 6.0  # mean abs pixel diff (0-255); untuned heuristic
 # — no real loopable:true segment has been produced yet to calibrate against.
 
-COMPOSITIONS = ("blur_fill", "tight_crop", "split_screen")
+# facecam_split's facecam panel: how much of the source frame (as a fraction
+# of width/height) to crop from the detected corner, not just the tight Haar
+# face box. The real overlay (background, shoulders, headset) runs well past
+# the face alone — confirmed against real thumbnails, where the Doc clip's
+# visible facecam box spans ~35% of frame width/height against a Haar box
+# covering only ~9%. Untuned beyond those two real reference images; likely
+# needs revisiting once more real facecam layouts have been seen.
+FACECAM_PANEL_FRACTION = 0.35
+
+COMPOSITIONS = ("blur_fill", "tight_crop", "split_screen", "facecam_split")
 
 
 def _check_fonts() -> None:
@@ -203,6 +218,58 @@ def _split_screen_video() -> str:
         "crop=1080:864,setsar=1[game];"
         "[base][src]overlay=0:250[t1];"
         "[t1][game]overlay=0:1056[comp]"
+    )
+
+
+def _facecam_split_video(face_region: dict) -> str:
+    """Twitch-clip facecam layout (CLAUDE.md step: composition fix): the
+    SAME source split into a main-content panel and a facecam panel, instead
+    of split_screen's source+separate-gameplay-file. Video-only chain,
+    ending in [comp] — see _blur_fill_video.
+
+    Panel position is fixed regardless of which corner the source's own
+    facecam happens to sit in — main content always on top (y=250, the
+    "primary subject" slot per the existing split_screen convention — this
+    clip's actual point is the gameplay moment, the facecam is reaction/
+    context), facecam always on bottom (y=1056). Consistency across every
+    facecam-style upload matters more here than mirroring each source's own
+    layout — the whole reason split_screen (fixed geometry) was chosen over
+    a dynamic pan.
+
+    face_region is find_face_region()'s real-pixel-coordinate result;
+    is_small_corner_facecam(face_region) must already be True — this
+    function doesn't re-check that itself, render() does before calling it.
+    """
+    fw, fh = face_region["frame_width"], face_region["frame_height"]
+    cx = (face_region["x"] + face_region["w"] / 2) / fw
+    cy = (face_region["y"] + face_region["h"] / 2) / fh
+
+    # Facecam panel source crop: a fixed-fraction region anchored flush to
+    # whichever corner the detection landed in (see FACECAM_PANEL_FRACTION),
+    # not a tight crop of the Haar box alone.
+    crop_w = round(fw * FACECAM_PANEL_FRACTION)
+    crop_h = round(fh * FACECAM_PANEL_FRACTION)
+    facecam_x = 0 if cx < 0.5 else fw - crop_w
+    facecam_y = 0 if cy < 0.5 else fh - crop_h
+
+    # Main-content panel: after scale-to-cover, crop from whichever
+    # horizontal side is farthest from the facecam's corner, so the
+    # overlay doesn't visibly repeat in both panels. Only horizontal
+    # offset is adjustable — scale-to-cover a 16:9 source into an
+    # (approximately) 1080x864 panel matches height exactly and overflows
+    # only in width, so there's no vertical crop slack to shift either way.
+    main_crop_x = "0" if cx >= 0.5 else "in_w-out_w"
+
+    return (
+        "color=c=black:s=1080x1920:r=30[base];"
+        "[0:v]split=2[main_src][face_src];"
+        "[main_src]scale=1080:864:force_original_aspect_ratio=increase,"
+        f"crop=1080:864:x={main_crop_x}:y=0,setsar=1[main];"
+        f"[face_src]crop={crop_w}:{crop_h}:{facecam_x}:{facecam_y},"
+        "scale=1080:864:force_original_aspect_ratio=increase,"
+        "crop=1080:864,setsar=1[face];"
+        "[base][main]overlay=0:250[t1];"
+        "[t1][face]overlay=0:1056[comp]"
     )
 
 
@@ -405,7 +472,7 @@ def render(
     end: float,
     tone: str,
     *,
-    composition: str = "tight_crop",
+    composition: str | None = None,
     punchline_at: float | None = None,
     vo_placement: str | None = None,
     loopable: bool = False,
@@ -416,7 +483,15 @@ def render(
     ``tone`` is a required lookup into styles.yaml (clipper.styles) — no
     default, since a missing tone must fail loudly rather than silently
     reusing whatever style happened to run last. ``composition`` selects the
-    filter graph: tight_crop (default baseline), blur_fill, or split_screen.
+    filter graph: tight_crop (baseline), blur_fill, split_screen, or
+    facecam_split. Leaving it unset (None, the default) auto-detects: runs
+    the visual gate's layer 2 (clipper.face_detect) against the source's own
+    [start, end] window, and uses facecam_split only when a small corner
+    facecam is actually found there — a podcast-style source with no
+    facecam (or nothing consistent enough to trust) falls back to
+    tight_crop, unchanged from before this existed. Passing an explicit
+    composition name always skips detection and honors that choice exactly
+    as it always has.
 
     ``punchline_at`` and ``vo_placement`` opt into VO mixing and are only
     honored when work/{video_id}/vo_{n}.wav also exists — pass neither for the
@@ -429,9 +504,10 @@ def render(
 
     Returns the path to out_{n}.mp4.
     """
-    if composition not in COMPOSITIONS:
+    if composition is not None and composition not in COMPOSITIONS:
         raise ValueError(
-            f"render: unknown composition {composition!r}, expected one of {COMPOSITIONS}"
+            f"render: unknown composition {composition!r}, expected one of "
+            f"{COMPOSITIONS} or None (auto-detect)"
         )
 
     duration = end - start
@@ -461,6 +537,24 @@ def render(
     if out_path.exists() and not force:
         log.info("render: cache hit for %s (%s), skipping. Pass force to re-render.", out_path, n)
         return str(out_path)
+
+    # Detection only runs when actually needed for this render: skipped
+    # entirely above on a cache hit, and below whenever an explicit
+    # composition other than facecam_split was given.
+    face_region = None
+    if composition is None or composition == "facecam_split":
+        face_region = find_face_region(str(source), start, end)
+        has_facecam = bool(face_region) and is_small_corner_facecam(face_region)
+
+        if composition is None:
+            composition = "facecam_split" if has_facecam else "tight_crop"
+            log.info("render: n=%d composition auto-detected -> %s", n, composition)
+        elif not has_facecam:
+            raise ValueError(
+                f"render: n={n} composition='facecam_split' was requested explicitly, "
+                "but no small corner facecam was detected in this clip's own footage "
+                "— pass a different composition, or leave composition unset to auto-detect."
+            )
 
     words = json.loads(words_path.read_text())["words"]
 
@@ -566,8 +660,10 @@ def render(
         video_fc = _blur_fill_video()
     elif composition == "tight_crop":
         video_fc = _tight_crop_video()
-    else:  # split_screen
+    elif composition == "split_screen":
         video_fc = _split_screen_video()
+    else:  # facecam_split — face_region is guaranteed set, see above
+        video_fc = _facecam_split_video(face_region)
 
     audio_fc = _audio_tail(vo)
     tail = _caption_and_watermark_tail("comp", str(ass_path), fonts_dir, wm_font)

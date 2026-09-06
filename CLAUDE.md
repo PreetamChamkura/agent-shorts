@@ -81,6 +81,32 @@ Validate `why` contains two parseable timestamps. If not, drop the segment — i
 
 `loopable` is true only for the small minority of segments whose ending flows naturally back into their start. When true, stage 4 should end cleanly on the last frame — no fade, no hard cut — so a platform's auto-repeat creates the loop illusion. This does not apply to ordinary segments. Stage 4 re-snaps `end` to a word boundary and confirms the frame at that exact timestamp is stable (not mid-blink or motion-blurred) before freezing on it, stepping back a few frames if it isn't.
 
+## Sources beyond a single YouTube upload
+
+`clipper clip URL` accepts any yt-dlp-supported URL — YouTube or Twitch — and routes automatically based on the URL's own shape, never a flag the caller has to remember.
+
+**Livestreams (YouTube and Twitch).** This pipeline is batch and needs a finished file. The supported path is the VOD (`live_status: was_live`) — wait for the broadcast to end, ingest the recording like any other video, no special handling needed. A still-airing stream (`is_live`) fails loudly rather than silently hanging: yt-dlp follows the live edge in real time, so ingesting one blocks for however long the stream runs. Recording from the start is available via an explicit `live_from_start` opt-in, which still blocks until the broadcast ends and is documented upstream as experimental.
+
+**Twitch VODs** need no code beyond the above — same generic `ingest()`, same `live_status` gate. Window count (stage 3) scales with source length (~8 windows/hour); a multi-hour stream costs proportionally more LLM calls than a short upload, logged up front before spending.
+
+**Twitch clips** are a distinct, simpler path: a clip is already a human-curated moment, so stage 3's long-form window-hunting is skipped entirely.
+
+- `clipper fetch-clips CHANNEL` — Helix API discovery (`/helix/clips`, client-credentials app token, no user login/scopes needed for this read-only lookup). Lists candidates (view count, date, title) before anything downloads. Sortable by view count, filterable by date range.
+- The visual quality gate (below) screens candidates before/after download.
+- `select_clip()` + `prompts/select_clip.md` replace `select()`/`select.md`: one LLM call over the whole clip instead of one per window, boundaries already given rather than searched for. Same output schema and the same `validate_segment()` as the long-form path — payoff-quote cross-check, loopable rules, the 18-58s range and 25-40s soft preference all apply unchanged. A clip under 18s is rejected before ever calling the model.
+
+### Visual quality gate
+
+Twitch clips get no visual screening from stage 3 (it only ever sees a transcript), so a clip can be selected purely on its words while being visually dead. Three layers, cheapest first, each thinning the batch before the next spends more:
+
+| layer | what | gates or informs |
+|---|---|---|
+| 1 — thumbnail pre-filter | Helix's own `thumbnail_url`, scored before any download/transcribe | hard-rejects only a near-blank/placeholder frame (variance floor) — see below for why it's this narrow |
+| 2 — facecam detection | OpenCV Haar cascade across several sampled frames of the downloaded clip, clustered by position to reject one-off false positives | feeds render's composition choice (facecam_split vs tight_crop), never rejects a clip |
+| 3 — vision-model judgment | not yet built | the one layer with real per-clip cost; only ever runs on what survives layers 1-2 |
+
+Layer 1 turned out narrower than first scoped, and that's a real finding, not a shortcut: variance, dark-pixel-fraction, and edge-density (whole-frame and per-quadrant) were tested against real fetched thumbnails and none reliably separates "visually empty" from "legitimately dark/moody content" — a hand on a desk mat can score *higher* contrast than a genuinely dark dungeon-crawler screenshot. A single static frame's pixel statistics can't make that call; it's semantic, not statistical, which is exactly why layer 3 exists. Layer 1 therefore only catches the case it safely can (a blank/placeholder frame) and logs every candidate's scores regardless of outcome for visibility.
+
 ## Narrator persona
 
 One voice, permanently. Never randomize the voice, name, or register. This is channel identity and it only compounds if it stays fixed.
@@ -198,6 +224,26 @@ color=c=black:s=1080x1920:r=30[base];
 Gameplay scales to cover the 1080x864 panel, then center-crops. A plain
 `scale=-2:864` only reaches 1080 wide at 5:4 or wider — 16:9 and vertical
 footage would land short and leave the panel unfilled.
+
+### Facecam split (Twitch clips)
+
+```
+color=c=black:s=1080x1920:r=30[base];
+[0:v]split=2[main_src][face_src];
+[main_src]scale=1080:864:force_original_aspect_ratio=increase,
+    crop=1080:864:x={0 or in_w-out_w}:y=0,setsar=1[main];
+[face_src]crop={panel_w}:{panel_h}:{corner_x}:{corner_y},
+    scale=1080:864:force_original_aspect_ratio=increase,
+    crop=1080:864,setsar=1[face];
+[base][main]overlay=0:250[t1];
+[t1][face]overlay=0:1056[comp]
+```
+
+Both panels come from the SAME source (no separate gameplay file, unlike split screen above). Panel position is fixed — main content always top, facecam always bottom — regardless of which corner the source's own facecam sits in; consistency across every facecam-style upload matters more than mirroring each clip's own layout. `{corner_x}/{corner_y}` anchor a `FACECAM_PANEL_FRACTION` (0.35) crop flush to whichever corner the detected facecam center falls nearest — not a tight crop of the detected face box alone, since a real overlay (background, shoulders, headset) runs well past the face itself. The main panel's crop `x` offset is chosen to fall on whichever side is farthest from the facecam's corner, so the same overlay doesn't visibly repeat in both panels.
+
+Selected automatically — not a manual `--composition` choice like split_screen above. `render()` runs face detection (`clipper.face_detect`) against the clip's own footage whenever `composition` is left unset; `facecam_split` is used only when a small corner facecam is actually found, otherwise `tight_crop`. A podcast-style source (subject fills the frame, e.g. a wide two-shot with no PIP overlay) always falls back to `tight_crop` unchanged.
+
+Known limitation: corner detection currently checks whether the facecam's *center* falls within `CORNER_MARGIN_FRACTION` (0.25) of both a horizontal and vertical edge. A real facecam positioned with some vertical margin above the game's own HUD (confirmed on a real clip) can fail this check and fall back to `tight_crop` — a missed optimization, not a broken render, and the safer failure direction versus the alternative (incorrectly split-screening a real podcast face, confirmed as a real false-positive risk during testing). Revisit with more real facecam layouts before loosening the margin.
 
 ### Tail, both compositions
 

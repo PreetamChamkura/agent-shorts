@@ -69,9 +69,14 @@ def _add_clip_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--n", type=int, default=0, help="clip index within the video")
     p.add_argument(
         "--composition",
-        choices=["tight_crop", "blur_fill", "split_screen"],
-        default="tight_crop",
-        help="filter graph to render with (default: tight_crop)",
+        choices=["tight_crop", "blur_fill", "split_screen", "facecam_split"],
+        default=None,
+        help=(
+            "filter graph to render with. Default: auto-detect — runs the visual "
+            "gate's facecam detection and uses facecam_split only if a small corner "
+            "facecam is actually found; falls back to tight_crop otherwise. Pass "
+            "one explicitly to skip detection and force that composition."
+        ),
     )
     p.add_argument("--force", action="store_true", help="ignore cached outputs for this stage")
 
