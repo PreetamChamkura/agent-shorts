@@ -14,9 +14,12 @@ import pytest
 from clipper.twitch import (
     TwitchAuthError,
     _normalize_clip,
+    _normalize_stream,
     fetch_clips,
+    fetch_trending_clips,
     get_app_access_token,
     get_broadcaster_id,
+    get_top_live_streams,
     is_twitch_clip_url,
     token_needs_refresh,
 )
@@ -262,3 +265,184 @@ def test_request_retries_once_on_429(monkeypatch):
     resp = twitch_mod._request("GET", "https://x", headers={})
     assert resp.status_code == 200
     assert len(calls) == 2
+
+
+# --- get_top_live_streams: zero-filter /helix/streams, sort + pagination ----
+
+
+def _stream(login, viewers):
+    return {
+        "user_id": f"id_{login}",
+        "user_login": login,
+        "user_name": login,
+        "viewer_count": viewers,
+        "game_id": "1",
+        "game_name": "Some Game",
+        "title": "t",
+        "language": "en",
+    }
+
+
+def test_normalize_stream_shape():
+    n = _normalize_stream(_stream("shroud", 50000))
+    assert n["broadcaster_id"] == "id_shroud"
+    assert n["broadcaster_login"] == "shroud"
+    assert n["viewer_count"] == 50000
+
+
+def test_get_top_live_streams_sorts_by_viewer_count_desc(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    page = {
+        "data": [_stream("low", 5), _stream("high", 500), _stream("mid", 50)],
+        "pagination": {},
+    }
+    monkeypatch.setattr(twitch_mod, "_request", lambda *a, **k: _FakeResponse(200, page))
+    streams = get_top_live_streams(token="t", client_id="c", count=10)
+    assert [s["broadcaster_login"] for s in streams] == ["high", "mid", "low"]
+
+
+def test_get_top_live_streams_no_filter_params(monkeypatch):
+    # Confirms this really is the zero-filter call (no broadcaster_id/game_id
+    # ever sent) — the whole point of using /helix/streams for discovery.
+    import clipper.twitch as twitch_mod
+
+    seen_params = {}
+
+    def fake_request(method, url, *, headers, params=None):
+        seen_params.update(params or {})
+        assert "/streams" in url
+        return _FakeResponse(200, {"data": [], "pagination": {}})
+
+    monkeypatch.setattr(twitch_mod, "_request", fake_request)
+    get_top_live_streams(token="t", client_id="c", count=5)
+    assert "broadcaster_id" not in seen_params
+    assert "game_id" not in seen_params
+
+
+def test_get_top_live_streams_respects_count(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    page = {"data": [_stream(str(i), i) for i in range(20)], "pagination": {}}
+    monkeypatch.setattr(twitch_mod, "_request", lambda *a, **k: _FakeResponse(200, page))
+    streams = get_top_live_streams(token="t", client_id="c", count=5)
+    assert len(streams) == 5
+
+
+# --- fetch_trending_clips: streams -> per-channel fetch_clips, tagged ------
+
+
+def test_fetch_trending_clips_queries_top_streams_then_each_channel(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    streams = [_normalize_stream(_stream("big", 900)), _normalize_stream(_stream("small", 100))]
+    monkeypatch.setattr(twitch_mod, "get_top_live_streams", lambda **k: streams)
+
+    calls = []
+
+    def fake_fetch_clips(broadcaster_id, **k):
+        calls.append(broadcaster_id)
+        return [_normalize_clip(_clip(f"{broadcaster_id}-clip", 42))]
+
+    monkeypatch.setattr(twitch_mod, "fetch_clips", fake_fetch_clips)
+
+    clips = fetch_trending_clips(token="t", client_id="c", limit=10)
+    assert calls == ["id_big", "id_small"]
+    assert len(clips) == 2
+
+
+def test_fetch_trending_clips_tags_discovery_mode(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    stream = _normalize_stream(_stream("shroud", 5000))
+    monkeypatch.setattr(twitch_mod, "get_top_live_streams", lambda **k: [stream])
+    monkeypatch.setattr(
+        twitch_mod, "fetch_clips", lambda broadcaster_id, **k: [_normalize_clip(_clip("c1", 10))]
+    )
+
+    clips = fetch_trending_clips(token="t", client_id="c", limit=10)
+    assert clips[0]["discovery"] == {
+        "mode": "trending",
+        "channel": "shroud",
+        "viewer_count_at_discovery": 5000,
+    }
+
+
+def test_fetch_trending_clips_sorts_across_channels_by_view_count(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    streams = [_normalize_stream(_stream("a", 900)), _normalize_stream(_stream("b", 800))]
+    monkeypatch.setattr(twitch_mod, "get_top_live_streams", lambda **k: streams)
+
+    def fake_fetch_clips(broadcaster_id, **k):
+        # channel "a" has the LOWER-viewed clip, channel "b" has the higher —
+        # final order must be by clip view_count, not by channel viewer rank.
+        views = 5 if broadcaster_id == "id_a" else 500
+        return [_normalize_clip(_clip(f"{broadcaster_id}-clip", views))]
+
+    monkeypatch.setattr(twitch_mod, "fetch_clips", fake_fetch_clips)
+
+    clips = fetch_trending_clips(token="t", client_id="c", limit=10)
+    assert clips[0]["view_count"] == 500
+
+
+def test_fetch_trending_clips_respects_limit(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    streams = [_normalize_stream(_stream(f"ch{i}", 100 - i)) for i in range(10)]
+    monkeypatch.setattr(twitch_mod, "get_top_live_streams", lambda **k: streams)
+    monkeypatch.setattr(
+        twitch_mod,
+        "fetch_clips",
+        lambda broadcaster_id, **k: [_normalize_clip(_clip(f"{broadcaster_id}-c", 1))],
+    )
+
+    clips = fetch_trending_clips(token="t", client_id="c", limit=3)
+    assert len(clips) == 3
+
+
+def test_fetch_trending_clips_skips_channel_on_fetch_error(monkeypatch):
+    import requests
+
+    import clipper.twitch as twitch_mod
+
+    streams = [_normalize_stream(_stream("bad", 900)), _normalize_stream(_stream("good", 800))]
+    monkeypatch.setattr(twitch_mod, "get_top_live_streams", lambda **k: streams)
+
+    def fake_fetch_clips(broadcaster_id, **k):
+        if broadcaster_id == "id_bad":
+            raise requests.RequestException("boom")
+        return [_normalize_clip(_clip("good-clip", 10))]
+
+    monkeypatch.setattr(twitch_mod, "fetch_clips", fake_fetch_clips)
+
+    clips = fetch_trending_clips(token="t", client_id="c", limit=10)
+    assert len(clips) == 1
+    assert clips[0]["id"] == "good-clip"
+
+
+def test_fetch_trending_clips_passes_per_channel_limit_and_dates(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    stream = _normalize_stream(_stream("shroud", 5000))
+    monkeypatch.setattr(twitch_mod, "get_top_live_streams", lambda **k: [stream])
+
+    seen = {}
+
+    def fake_fetch_clips(broadcaster_id, **k):
+        seen.update(k)
+        return []
+
+    monkeypatch.setattr(twitch_mod, "fetch_clips", fake_fetch_clips)
+
+    fetch_trending_clips(
+        token="t",
+        client_id="c",
+        limit=10,
+        per_channel_limit=3,
+        started_at="2026-01-01T00:00:00Z",
+        ended_at="2026-02-01T00:00:00Z",
+    )
+    assert seen["limit"] == 3
+    assert seen["started_at"] == "2026-01-01T00:00:00Z"
+    assert seen["ended_at"] == "2026-02-01T00:00:00Z"

@@ -92,7 +92,8 @@ Validate `why` contains two parseable timestamps. If not, drop the segment — i
 **Twitch clips** are a distinct, simpler path: a clip is already a human-curated moment, so stage 3's long-form window-hunting is skipped entirely.
 
 - `clipper fetch-clips CHANNEL` — Helix API discovery (`/helix/clips`, client-credentials app token, no user login/scopes needed for this read-only lookup). Lists candidates (view count, date, title) before anything downloads. Sortable by view count, filterable by date range.
-- The visual quality gate (below) screens candidates before/after download.
+- `clipper fetch-trending` — discovery with no channel given up front. `/helix/clips` has no unfiltered/global mode (confirmed against Twitch's own API reference: it requires `broadcaster_id`, `game_id`, or `id`), so this goes through `/helix/streams` first — which does support a zero-filter call, confirmed for real against a live request, and comes back sorted by viewer count — to find the top currently-live channels, then calls the same `fetch_clips()` per channel. Every clip is tagged `clip["discovery"] = {"mode": "trending"|"channel", "channel": ...}` (the channel-specific path tags its own clips the same way) so which mode found a clip stays visible in the printed list and any `--out` manifest, for comparing how trending-sourced clips perform against channel-specific ones later.
+- The visual quality gate (below) screens candidates before/after download — identically for both discovery modes.
 - `select_clip()` + `prompts/select_clip.md` replace `select()`/`select.md`: one LLM call over the whole clip instead of one per window, boundaries already given rather than searched for. Same output schema and the same `validate_segment()` as the long-form path — payoff-quote cross-check, loopable rules, the 18-58s range and 25-40s soft preference all apply unchanged. A clip under 18s is rejected before ever calling the model.
 
 ### Visual quality gate

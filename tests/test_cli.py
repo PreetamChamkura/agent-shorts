@@ -8,7 +8,13 @@ import json
 import pytest
 
 from clipper import paths
-from clipper.cli import _manual_spec, _segment_from_file, _vo_kwargs
+from clipper.cli import (
+    _manual_spec,
+    _print_clip_list,
+    _segment_from_file,
+    _vo_kwargs,
+    _write_clips_out,
+)
 
 
 def _args(**over):
@@ -204,3 +210,106 @@ def test_clip_command_skips_visual_gate_for_non_twitch_url(monkeypatch):
     _patch_stages(monkeypatch, judge_verdict={"passed": True, "reason": "x"}, seg=seg)
 
     main(["clip", "https://www.youtube.com/watch?v=abc123"])
+
+
+# --- _print_clip_list / _write_clips_out: shared by fetch-clips and --------
+# --- fetch-trending ----------------------------------------------------
+
+
+def _clip(id_, views=10, discovery=None, gate=None):
+    c = {
+        "id": id_,
+        "view_count": views,
+        "created_at": "2026-01-01T00:00:00Z",
+        "duration": 30.0,
+        "title": "a title",
+    }
+    if discovery is not None:
+        c["discovery"] = discovery
+    if gate is not None:
+        c["visual_gate"] = {"layer_1": gate}
+    return c
+
+
+def test_print_clip_list_shows_discovery_mode(capsys):
+    clips = [_clip("a", discovery={"mode": "trending", "channel": "shroud"})]
+    _print_clip_list(clips)
+    out = capsys.readouterr().out
+    assert "[trending:shroud]" in out
+
+
+def test_print_clip_list_shows_channel_discovery_mode(capsys):
+    clips = [_clip("a", discovery={"mode": "channel", "channel": "shroud"})]
+    _print_clip_list(clips)
+    out = capsys.readouterr().out
+    assert "[channel:shroud]" in out
+
+
+def test_print_clip_list_no_discovery_tag_when_absent(capsys):
+    _print_clip_list([_clip("a")])
+    out = capsys.readouterr().out
+    assert "[" not in out.split("a")[0]  # nothing bracketed before the id
+
+
+def test_print_clip_list_counts_layer1_rejections(capsys):
+    clips = [
+        _clip(
+            "a",
+            gate={
+                "passed": False,
+                "reason": "blank",
+                "variance": 1,
+                "dark_fraction": 1,
+                "edge_density": 1,
+            },
+        ),
+        _clip("b", gate={"passed": True, "variance": 500, "dark_fraction": 0.1, "edge_density": 5}),
+    ]
+    n_rejected = _print_clip_list(clips)
+    assert n_rejected == 1
+
+
+def test_write_clips_out_noop_when_no_path(tmp_path):
+    # Must not raise or create anything when --out wasn't given.
+    _write_clips_out(None, [_clip("a")], channel="shroud")
+
+
+def test_write_clips_out_includes_channel_when_given(tmp_path):
+    out_path = tmp_path / "out.json"
+    _write_clips_out(str(out_path), [_clip("a")], channel="shroud")
+    data = json.loads(out_path.read_text())
+    assert data["channel"] == "shroud"
+    assert len(data["clips"]) == 1
+
+
+def test_write_clips_out_omits_channel_key_for_trending(tmp_path):
+    out_path = tmp_path / "out.json"
+    _write_clips_out(str(out_path), [_clip("a")], channel=None)
+    data = json.loads(out_path.read_text())
+    assert "channel" not in data
+
+
+# --- fetch-trending command dispatch ----------------------------------------
+
+
+def test_fetch_trending_command_calls_fetch_trending_clips(monkeypatch, capsys):
+    import clipper.twitch as twitch_mod
+    from clipper.cli import main
+
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "cid")
+    monkeypatch.setattr(twitch_mod, "get_app_access_token", lambda **k: "tok")
+
+    seen = {}
+
+    def fake_fetch_trending(**k):
+        seen.update(k)
+        return [_clip("x", discovery={"mode": "trending", "channel": "shroud"})]
+
+    monkeypatch.setattr(twitch_mod, "fetch_trending_clips", fake_fetch_trending)
+
+    main(["fetch-trending", "--limit", "7", "--top-channels", "12", "--no-visual-gate"])
+
+    assert seen["limit"] == 7
+    assert seen["top_channels"] == 12
+    out = capsys.readouterr().out
+    assert "trending clip(s)" in out

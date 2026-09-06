@@ -9,6 +9,13 @@ reports no live_status at all (a clip is a fixed-duration excerpt, finished
 the instant it's created, regardless of whether the source channel happens
 to be live right now).
 
+Two discovery modes, sharing everything downstream: `fetch_clips()` for a
+specific known channel, and `fetch_trending_clips()` for channels not known
+in advance — clips returned by either flow through the identical
+ingest/transcribe/visual-gate/select_clip/render pipeline unchanged. Each
+clip is tagged clip["discovery"] = {"mode": "channel"|"trending", ...} so
+which mode found it stays visible wherever clip metadata already travels.
+
 Auth: client-credentials grant (app access token) against Twitch's OAuth2
 token endpoint. This is a read-only public-data lookup — no user login, no
 scopes; the app never acts on anyone's behalf. Requires TWITCH_CLIENT_ID and
@@ -233,3 +240,132 @@ def fetch_clips(
 
     collected.sort(key=lambda c: c["view_count"], reverse=True)
     return collected[:limit]
+
+
+def _normalize_stream(raw: dict) -> dict:
+    return {
+        "broadcaster_id": raw["user_id"],
+        "broadcaster_login": raw.get("user_login"),
+        "broadcaster_name": raw.get("user_name"),
+        "viewer_count": int(raw.get("viewer_count") or 0),
+        "game_id": raw.get("game_id"),
+        "game_name": raw.get("game_name"),
+        "title": raw.get("title", ""),
+        "language": raw.get("language"),
+    }
+
+
+def get_top_live_streams(*, token: str, client_id: str, count: int = 20) -> list[dict]:
+    """Up to ``count`` currently-live streams, no filter — Helix's own
+    default order for an unfiltered /helix/streams call.
+
+    Confirmed with a real call (no filter applied) rather than assumed:
+    results already come back sorted by viewer_count descending. Re-sorted
+    here anyway for the same reason fetch_clips() re-asserts its own sort —
+    a hard requirement shouldn't rest on an implicit, undocumented ordering
+    that could change. Paginates in pages of CLIPS_PAGE_SIZE if ``count``
+    exceeds Helix's 100-per-page max.
+    """
+    headers = _auth_headers(token, client_id)
+    collected: list[dict] = []
+    cursor: str | None = None
+
+    while len(collected) < count:
+        params = {"first": min(CLIPS_PAGE_SIZE, max(count, 1))}
+        if cursor:
+            params["after"] = cursor
+        resp = _request("GET", f"{API_BASE}/streams", headers=headers, params=params)
+        body = resp.json()
+        page = body.get("data", [])
+        collected.extend(_normalize_stream(s) for s in page)
+        cursor = (body.get("pagination") or {}).get("cursor")
+        if not cursor or not page:
+            break
+
+    collected.sort(key=lambda s: s["viewer_count"], reverse=True)
+    return collected[:count]
+
+
+def fetch_trending_clips(
+    *,
+    token: str,
+    client_id: str,
+    limit: int = 20,
+    top_channels: int = 15,
+    per_channel_limit: int = 5,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+) -> list[dict]:
+    """Up to ``limit`` clips discovered from currently-trending channels,
+    with no broadcaster given up front — the trending counterpart to
+    fetch_clips().
+
+    Helix's /helix/clips has no global/unfiltered mode: it requires
+    broadcaster_id, game_id, or id (confirmed against the API reference,
+    not assumed). There is no server-side "trending clips" query at all.
+    So this goes through /helix/streams first (which DOES support a
+    zero-filter call, confirmed for real: an unfiltered request came back
+    already sorted by viewer_count, 384824 > 199639 > 62450 > ...) to find
+    the top currently-live channels, then calls the existing fetch_clips()
+    per channel — reusing it unchanged rather than duplicating its
+    pagination/sort/normalization logic.
+
+    Each returned clip carries clip["discovery"] = {"mode": "trending",
+    "channel": <broadcaster_login>, "viewer_count_at_discovery": <int>} —
+    the same field the `fetch-clips` CLI command stamps with mode="channel"
+    for the broadcaster-specific path, so which discovery mode found a clip
+    is visible wherever clip metadata already travels (the printed list,
+    the --out manifest, and the visual-gate-annotated dicts) without a new
+    mechanism.
+
+    A live channel with zero public clips (or a clip fetch that errors) is
+    skipped, not fatal — trending discovery inherently means some
+    candidates won't pan out. Queries at most ``top_channels`` channels
+    regardless of whether ``limit`` is reached; returns fewer than
+    ``limit`` rather than open-endedly querying more channels.
+    """
+    streams = get_top_live_streams(token=token, client_id=client_id, count=top_channels)
+    log.info("twitch: fetch_trending_clips: %d top live channel(s) to query", len(streams))
+
+    collected: list[dict] = []
+    for stream in streams:
+        try:
+            clips = fetch_clips(
+                stream["broadcaster_id"],
+                token=token,
+                client_id=client_id,
+                limit=per_channel_limit,
+                started_at=started_at,
+                ended_at=ended_at,
+            )
+        except requests.RequestException as exc:
+            log.warning(
+                "twitch: fetch_trending_clips: clip fetch failed for %s (%s) — skipping",
+                stream["broadcaster_login"],
+                exc,
+            )
+            continue
+
+        for clip in clips:
+            clip["discovery"] = {
+                "mode": "trending",
+                "channel": stream["broadcaster_login"],
+                "viewer_count_at_discovery": stream["viewer_count"],
+            }
+        collected.extend(clips)
+        log.info(
+            "twitch: fetch_trending_clips: %s (%d viewers) -> %d clip(s)",
+            stream["broadcaster_login"],
+            stream["viewer_count"],
+            len(clips),
+        )
+
+    collected.sort(key=lambda c: c["view_count"], reverse=True)
+    result = collected[:limit]
+    log.info(
+        "twitch: fetch_trending_clips: %d channel(s) queried -> %d clip(s) found, %d kept",
+        len(streams),
+        len(collected),
+        len(result),
+    )
+    return result

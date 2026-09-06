@@ -49,6 +49,20 @@ another. Subcommands:
       frames, logs scores for everything. Sanity-check the list before
       running `clipper clip` on any of them.
 
+  clipper fetch-trending [--limit N] [--top-channels N] [--per-channel-limit N]
+                         [--since T] [--until T] [--out PATH] [--no-visual-gate]
+      setup tool, not a stage. Trending counterpart to fetch-clips — no
+      channel given up front. Helix's /helix/clips has no unfiltered/global
+      mode (confirmed against the API reference), so this queries
+      /helix/streams (which does support a zero-filter call, sorted by
+      viewer count) for the top currently-live channels, then calls
+      clipper.twitch.fetch_clips() per channel — same downstream pipeline
+      as fetch-clips, just a different discovery source. Each clip is
+      tagged clip["discovery"] = {"mode": "trending", "channel": ...,
+      "viewer_count_at_discovery": ...}; fetch-clips tags its own clips
+      {"mode": "channel", "channel": ...} the same way, so which mode found
+      a clip stays visible in the printed list and any --out manifest.
+
 --start/--end/--tone are given together or not at all; a partial set is an
 error rather than a half-manual guess. Manual mode never mixes in VO (there is
 no punchline_at to place it against) — that's the segments.json path only.
@@ -128,6 +142,59 @@ def _vo_kwargs(seg: dict) -> dict:
     return {"punchline_at": float(seg["punchline_at"]), "vo_placement": str(seg["vo_placement"])}
 
 
+def _require_twitch_client_id() -> str:
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    if not client_id:
+        raise SystemExit(
+            "clipper: TWITCH_CLIENT_ID not set in .env (see .env.example) — "
+            "register an app at dev.twitch.tv/console/apps"
+        )
+    return client_id
+
+
+def _print_clip_list(clips: list[dict]) -> int:
+    """One line per clip — visual-gate layer 1 status (if run), discovery
+    mode (channel login for both "channel" and "trending" modes), then the
+    usual id/views/date/duration/title. Returns the layer-1 rejected count,
+    0 if the gate wasn't run. Shared by fetch-clips and fetch-trending so
+    the two commands' output never drifts apart.
+    """
+    n_rejected = 0
+    for c in clips:
+        gate = (c.get("visual_gate") or {}).get("layer_1")
+        if gate is None:
+            status = ""
+        elif gate["passed"]:
+            status = (
+                f"[pass  var={gate['variance']:.0f} dark={gate['dark_fraction']:.2f} "
+                f"edge={gate['edge_density']:.1f}] "
+            )
+        else:
+            status = "[REJECT layer1] "
+            n_rejected += 1
+
+        discovery = c.get("discovery")
+        disc_tag = f"[{discovery['mode']}:{discovery['channel']}] " if discovery else ""
+
+        print(
+            f"{status}{disc_tag}{c['id']:<28} views={c['view_count']:>8,}  {c['created_at']}  "
+            f"{c['duration']:>4.0f}s  {c['title'][:55]}"
+        )
+    return n_rejected
+
+
+def _write_clips_out(out_path: str | None, clips: list[dict], *, channel: str | None) -> None:
+    if not out_path:
+        return
+    from pathlib import Path
+
+    payload: dict = {"clips": clips}
+    if channel is not None:
+        payload["channel"] = channel
+    Path(out_path).write_text(json.dumps(payload, indent=2))
+    print(f"wrote {out_path}")
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
@@ -195,6 +262,38 @@ def main(argv: list[str] | None = None) -> None:
     fetch_clips_p.add_argument("--until", help="RFC3339 timestamp — only clips created before this")
     fetch_clips_p.add_argument("--out", help="also write the fetched list as JSON to this path")
     fetch_clips_p.add_argument(
+        "--no-visual-gate",
+        action="store_true",
+        help="skip the layer-1 thumbnail pre-filter (stage 2b visual gate)",
+    )
+
+    fetch_trending_p = sub.add_parser(
+        "fetch-trending",
+        help="setup tool: list clips from currently-trending channels (no channel needed)",
+    )
+    fetch_trending_p.add_argument(
+        "--limit", type=int, default=10, help="max clips to list overall (default 10)"
+    )
+    fetch_trending_p.add_argument(
+        "--top-channels",
+        type=int,
+        default=15,
+        help="how many top live channels to pull clips from (default 15)",
+    )
+    fetch_trending_p.add_argument(
+        "--per-channel-limit",
+        type=int,
+        default=5,
+        help="max clips to pull from any one channel (default 5)",
+    )
+    fetch_trending_p.add_argument(
+        "--since", help="RFC3339 timestamp — only clips created at/after this"
+    )
+    fetch_trending_p.add_argument(
+        "--until", help="RFC3339 timestamp — only clips created before this"
+    )
+    fetch_trending_p.add_argument("--out", help="also write the fetched list as JSON to this path")
+    fetch_trending_p.add_argument(
         "--no-visual-gate",
         action="store_true",
         help="skip the layer-1 thumbnail pre-filter (stage 2b visual gate)",
@@ -345,12 +444,7 @@ def main(argv: list[str] | None = None) -> None:
         from .twitch import fetch_clips, get_app_access_token, get_broadcaster_id
         from .visual_gate import screen_clips_layer1
 
-        client_id = os.environ.get("TWITCH_CLIENT_ID")
-        if not client_id:
-            raise SystemExit(
-                "clipper: TWITCH_CLIENT_ID not set in .env (see .env.example) — "
-                "register an app at dev.twitch.tv/console/apps"
-            )
+        client_id = _require_twitch_client_id()
         token = get_app_access_token(client_id=client_id)
         broadcaster_id = get_broadcaster_id(args.channel, token=token, client_id=client_id)
         clips = fetch_clips(
@@ -361,37 +455,46 @@ def main(argv: list[str] | None = None) -> None:
             started_at=args.since,
             ended_at=args.until,
         )
+        # Same field fetch_trending_clips() stamps for its own clips (mode
+        # "trending") — which discovery mode found a clip stays visible
+        # wherever clip metadata already travels, not a new mechanism.
+        for c in clips:
+            c["discovery"] = {"mode": "channel", "channel": args.channel}
+
         if not args.no_visual_gate:
             clips = screen_clips_layer1(clips)
+        n_rejected = _print_clip_list(clips)
 
-        n_rejected = 0
-        for c in clips:
-            gate = (c.get("visual_gate") or {}).get("layer_1")
-            if gate is None:
-                status = ""
-            elif gate["passed"]:
-                status = (
-                    f"[pass  var={gate['variance']:.0f} dark={gate['dark_fraction']:.2f} "
-                    f"edge={gate['edge_density']:.1f}] "
-                )
-            else:
-                status = "[REJECT layer1] "
-                n_rejected += 1
-            print(
-                f"{status}{c['id']:<28} views={c['view_count']:>8,}  {c['created_at']}  "
-                f"{c['duration']:>4.0f}s  {c['title'][:55]}"
-            )
         summary = f"\n{len(clips)} clip(s) for {args.channel}"
         if not args.no_visual_gate:
             summary += f" — {n_rejected} rejected by layer 1, {len(clips) - n_rejected} passed"
         print(summary + " — nothing downloaded yet")
-        if args.out:
-            from pathlib import Path
+        _write_clips_out(args.out, clips, channel=args.channel)
 
-            Path(args.out).write_text(
-                json.dumps({"channel": args.channel, "clips": clips}, indent=2)
-            )
-            print(f"wrote {args.out}")
+    elif args.command == "fetch-trending":
+        from .twitch import fetch_trending_clips, get_app_access_token
+        from .visual_gate import screen_clips_layer1
+
+        client_id = _require_twitch_client_id()
+        token = get_app_access_token(client_id=client_id)
+        clips = fetch_trending_clips(
+            token=token,
+            client_id=client_id,
+            limit=args.limit,
+            top_channels=args.top_channels,
+            per_channel_limit=args.per_channel_limit,
+            started_at=args.since,
+            ended_at=args.until,
+        )
+        if not args.no_visual_gate:
+            clips = screen_clips_layer1(clips)
+        n_rejected = _print_clip_list(clips)
+
+        summary = f"\n{len(clips)} trending clip(s) across up to {args.top_channels} channel(s)"
+        if not args.no_visual_gate:
+            summary += f" — {n_rejected} rejected by layer 1, {len(clips) - n_rejected} passed"
+        print(summary + " — nothing downloaded yet")
+        _write_clips_out(args.out, clips, channel=None)
 
     else:  # argparse enforces required=True, but be explicit rather than silent.
         parser.error(f"unknown command {args.command!r}")
