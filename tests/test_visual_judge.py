@@ -224,3 +224,70 @@ def test_judge_clip_default_model_is_sonnet():
     from clipper.visual_judge import JUDGE_MODEL
 
     assert JUDGE_MODEL == "claude-sonnet-5"
+
+
+# --- caching: a real per-clip API cost must never be paid twice -------------
+
+
+def test_judge_clip_cache_hit_skips_the_model_call(tmp_path, monkeypatch):
+    import clipper.visual_judge as vj
+
+    wd = _setup(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        vj, "_call_model", lambda *a, **k: calls.append(1) or {"passed": True, "reason": "x"}
+    )
+    monkeypatch.setattr(
+        vj,
+        "_extract_preview_frame",
+        lambda source, ts, video_fc, out_path: out_path.write_bytes(b"x"),
+    )
+
+    first = judge_clip("vid1")
+    assert len(calls) == 1
+    assert (wd / "visual_judge.json").exists()
+
+    second = judge_clip("vid1")
+    assert len(calls) == 1  # not called again
+    assert second == first
+
+
+def test_judge_clip_force_recalls_the_model(tmp_path, monkeypatch):
+    import clipper.visual_judge as vj
+
+    _setup(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        vj, "_call_model", lambda *a, **k: calls.append(1) or {"passed": True, "reason": "x"}
+    )
+    monkeypatch.setattr(
+        vj,
+        "_extract_preview_frame",
+        lambda source, ts, video_fc, out_path: out_path.write_bytes(b"x"),
+    )
+
+    judge_clip("vid1")
+    judge_clip("vid1", force=True)
+    assert len(calls) == 2
+
+
+def test_judge_clip_cache_hit_does_not_require_source_to_exist(tmp_path, monkeypatch):
+    # Once cached, the verdict must be servable even if source.mp4 were
+    # since removed — mirrors every other stage's cache-hit-skips-the-
+    # existence-check behavior.
+    import json
+
+    import clipper.visual_judge as vj
+    from clipper import paths
+
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    wd = tmp_path / "vid1"
+    wd.mkdir()
+    (wd / "visual_judge.json").write_text(
+        json.dumps(
+            {"passed": True, "reason": "cached", "composition": "tight_crop", "frames_sampled": 5}
+        )
+    )
+
+    result = vj.judge_clip("vid1")
+    assert result["reason"] == "cached"

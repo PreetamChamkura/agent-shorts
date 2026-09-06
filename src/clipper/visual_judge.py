@@ -3,11 +3,25 @@ visual quality gate).
 
 The one layer with real per-clip cost, so it only ever runs on what survives
 layers 1 (thumbnail pre-filter) and 2 (facecam detection) — never the raw
-fetched batch. This is the layer that actually catches "boring but visible"
-content (the Doc clip's original failure mode: a hand on a desk mat — not
-blank, but nothing worth watching). Pixel statistics (layer 1) and face
-geometry (layer 2) both structurally cannot make that call; it's semantic,
-not statistical, which is exactly why a vision model sits here instead.
+fetched batch. Wired into `clipper clip` as a real gate: cli.py calls this
+right after transcribe() and before select_clip(), for Twitch clip URLs
+only, so a visually-rejected clip never reaches the (also costly) selection
+LLM call either.
+
+This is the layer that actually catches "boring but visible" content — the
+Doc clip's original failure mode under its old tight_crop rendering: a hand
+on a desk mat, not blank, but nothing worth watching. (The Doc clip now
+passes under its real, current composition — facecam_split, built earlier
+in this same session, already gives the facecam its own full panel and
+substantially fixed that specific case. Verified this layer still catches
+the original failure mode by forcing tight_crop back on and confirming
+rejection with the same complaint. The Doc clip is retired as this layer's
+positive-control test case for exactly that reason — CLAUDE.md Known
+issues names what a genuine one should look like: a facecam clip that's
+dead even with its own dedicated panel, not fixed by better composition
+alone.) Pixel statistics (layer 1) and face geometry (layer 2) both
+structurally cannot make this call; it's semantic, not statistical, which
+is exactly why a vision model sits here instead.
 
 Samples N_SAMPLE_FRAMES evenly across the clip's own duration, cropped
 through the SAME filter graph render() would actually use (tight_crop or
@@ -172,17 +186,32 @@ def _call_model(client, prompt: str, image_paths: list[Path], model: str) -> dic
     return json.loads(text)
 
 
-def judge_clip(video_id: str, *, model: str = JUDGE_MODEL) -> dict:
+def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) -> dict:
     """Layer 3: vision-model judgment of a downloaded clip's own footage.
 
     Reads work/{video_id}/source.mp4 (must already exist — this is the
     real-cost layer, only meant to run on clips that already survived
-    layers 1 and 2). Returns {"passed": bool, "reason": str, "composition":
-    str, "frames_sampled": int}. Touches no other pipeline file — the
-    caller decides what to do with the verdict.
+    layers 1 and 2). Writes/reads work/{video_id}/visual_judge.json —
+    this is a real per-clip API cost, so a re-run (retrying the pipeline,
+    tuning a later stage) must never re-pay for the same clip's verdict
+    unless force=True, same caching discipline as every other stage.
+    Returns {"passed": bool, "reason": str, "composition": str,
+    "frames_sampled": int}.
     """
     wd = work_dir(video_id)
     source = wd / "source.mp4"
+    cache_path = wd / "visual_judge.json"
+
+    if cache_path.exists() and not force:
+        cached = json.loads(cache_path.read_text())
+        log.info(
+            "visual_judge: cache hit for %s (%s) — %s",
+            video_id,
+            cache_path,
+            "PASS" if cached["passed"] else "REJECT",
+        )
+        return cached
+
     if not source.exists():
         raise FileNotFoundError(f"visual_judge: {source} missing — run stage 1 (ingest) first.")
 
@@ -227,4 +256,5 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL) -> dict:
         len(frame_paths),
         result["reason"],
     )
+    cache_path.write_text(json.dumps(result, indent=2))
     return result

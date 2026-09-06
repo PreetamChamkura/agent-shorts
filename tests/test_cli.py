@@ -96,3 +96,111 @@ def test_vo_kwargs_present_for_good_segment():
         "vo_placement": "pre_punchline",
     }
     assert _vo_kwargs(seg) == {"punchline_at": 37.1, "vo_placement": "pre_punchline"}
+
+
+# --- clip command: visual gate layer 3 wired before select_clip -----------
+# Every stage function is monkeypatched at its source module — cli.py's
+# `clip` branch does `from .X import Y` lazily inside the function, which
+# re-binds at call time, so patching clipper.X.Y before calling cli.main()
+# is the correct interception point.
+
+
+TWITCH_CLIP_URL = "https://clips.twitch.tv/SomeClipSlug"
+
+
+def _patch_stages(monkeypatch, *, judge_verdict, seg=None):
+    import clipper.ingest as ingest_mod
+    import clipper.narrate as narrate_mod
+    import clipper.render as render_mod
+    import clipper.select as select_mod
+    import clipper.transcribe as transcribe_mod
+    import clipper.visual_judge as visual_judge_mod
+
+    monkeypatch.setattr(ingest_mod, "ingest", lambda url, **k: "clip123")
+    monkeypatch.setattr(transcribe_mod, "transcribe", lambda video_id, **k: None)
+    monkeypatch.setattr(visual_judge_mod, "judge_clip", lambda video_id, **k: judge_verdict)
+
+    calls = {"select": 0, "select_clip": 0, "narrate": 0, "render": 0}
+
+    def fake_select_clip(video_id, **k):
+        calls["select_clip"] += 1
+
+    def fake_select(video_id, **k):
+        calls["select"] += 1
+
+    monkeypatch.setattr(select_mod, "select_clip", fake_select_clip)
+    monkeypatch.setattr(select_mod, "select", fake_select)
+    monkeypatch.setattr(
+        narrate_mod, "narrate", lambda video_id, **k: calls.__setitem__("narrate", 1)
+    )
+    monkeypatch.setattr(
+        render_mod, "render", lambda *a, **k: calls.__setitem__("render", 1) or "out.mp4"
+    )
+
+    if seg is not None:
+        import clipper.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "_segment_from_file", lambda video_id, n: seg)
+
+    return calls
+
+
+def test_clip_command_stops_before_select_clip_on_visual_reject(monkeypatch, capsys):
+    from clipper.cli import main
+
+    calls = _patch_stages(
+        monkeypatch,
+        judge_verdict={"passed": False, "reason": "static", "composition": "tight_crop"},
+    )
+
+    with pytest.raises(SystemExit, match="rejected by the visual gate"):
+        main(["clip", TWITCH_CLIP_URL])
+
+    assert calls["select_clip"] == 0
+    assert calls["narrate"] == 0
+    assert calls["render"] == 0
+
+
+def test_clip_command_proceeds_to_select_clip_on_visual_pass(monkeypatch):
+    from clipper.cli import main
+
+    seg = {
+        "n": 0,
+        "start": 0.0,
+        "end": 20.0,
+        "tone": "confident",
+        "vo_script": None,
+        "loopable": False,
+    }
+    calls = _patch_stages(
+        monkeypatch,
+        judge_verdict={"passed": True, "reason": "good", "composition": "facecam_split"},
+        seg=seg,
+    )
+
+    main(["clip", TWITCH_CLIP_URL])
+
+    assert calls["select_clip"] == 1
+    assert calls["narrate"] == 1
+    assert calls["render"] == 1
+
+
+def test_clip_command_skips_visual_gate_for_non_twitch_url(monkeypatch):
+    import clipper.visual_judge as visual_judge_mod
+    from clipper.cli import main
+
+    def fail_judge(*a, **k):
+        pytest.fail("judge_clip should not be called for a non-Twitch-clip URL")
+
+    monkeypatch.setattr(visual_judge_mod, "judge_clip", fail_judge)
+    seg = {
+        "n": 0,
+        "start": 0.0,
+        "end": 20.0,
+        "tone": "confident",
+        "vo_script": None,
+        "loopable": False,
+    }
+    _patch_stages(monkeypatch, judge_verdict={"passed": True, "reason": "x"}, seg=seg)
+
+    main(["clip", "https://www.youtube.com/watch?v=abc123"])

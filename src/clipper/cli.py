@@ -26,7 +26,10 @@ another. Subcommands:
       ingest -> transcribe -> (select|select-clip + narrate, if no manual
       args) -> render. Routes to select-clip automatically when URL is a
       Twitch clip (detected from the URL itself, not a flag) — see
-      clipper.twitch.is_twitch_clip_url.
+      clipper.twitch.is_twitch_clip_url. For Twitch clips only, the visual
+      gate's layer 3 (clipper.visual_judge) runs right before select-clip
+      and stops the pipeline (SystemExit) on a reject — never reaches the
+      selection LLM call for a clip the vision judgment rejects.
 
   clipper review VIDEO_ID [--port N]
       stage 5 only. Starts a local review server (http://127.0.0.1:PORT/)
@@ -263,6 +266,19 @@ def main(argv: list[str] | None = None) -> None:
             # CLAUDE.md step 2b). Detected from the URL's own shape, not a
             # flag, so this never needs remembering to pass anything extra.
             if is_twitch_clip_url(args.url):
+                from .visual_judge import judge_clip
+
+                # Visual gate layer 3: the one layer with real per-clip
+                # cost, so it runs here — after transcribe, before the
+                # ALSO-costly selection LLM call — rather than after
+                # select_clip. A visually-rejected clip never reaches
+                # select_clip at all.
+                verdict = judge_clip(video_id, force=args.force)
+                if not verdict["passed"]:
+                    raise SystemExit(
+                        f"clipper: {video_id} rejected by the visual gate "
+                        f"(layer 3, {verdict['composition']}): {verdict['reason']}"
+                    )
                 select_clip(video_id, force=args.force)
             else:
                 select(video_id, force=args.force)
