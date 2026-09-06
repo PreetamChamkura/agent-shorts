@@ -548,6 +548,22 @@ def render(
 
         if composition is None:
             composition = "facecam_split" if has_facecam else "tight_crop"
+            if face_region and not has_facecam:
+                # A face WAS found but failed the corner-proximity check —
+                # the known CORNER_MARGIN_FRACTION limitation (CLAUDE.md
+                # Known issues), distinct from the ordinary "no face at all"
+                # case below. Logged explicitly so real frequency is
+                # visible over time, not just theoretical.
+                log.info(
+                    "render: n=%d face detected at x=%.0f y=%.0f w=%.0f h=%.0f but "
+                    "failed the corner-proximity check — falling back to tight_crop "
+                    "(known limitation, see CLAUDE.md Known issues)",
+                    n,
+                    face_region["x"],
+                    face_region["y"],
+                    face_region["w"],
+                    face_region["h"],
+                )
             log.info("render: n=%d composition auto-detected -> %s", n, composition)
         elif not has_facecam:
             raise ValueError(

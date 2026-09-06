@@ -146,6 +146,38 @@ def test_auto_detect_falls_back_to_tight_crop_when_face_too_large(tmp_path, monk
     assert calls == [1]
 
 
+def test_missed_facecam_edge_case_is_logged_distinctly(tmp_path, monkeypatch, caplog):
+    # The known CORNER_MARGIN_FRACTION limitation (CLAUDE.md Known issues):
+    # a real face WAS found but failed the corner check. This must be
+    # logged distinctly from "no face detected at all" so real frequency
+    # is visible over time, not just theoretical — the exact ask that
+    # prompted this test.
+    _setup(tmp_path, monkeypatch)
+    region = _region(184, 671, 118, 118)  # real detection from the session
+    monkeypatch.setattr(render_mod, "find_face_region", lambda *a, **k: region)
+    monkeypatch.setattr(render_mod, "is_small_corner_facecam", lambda r: False)
+    monkeypatch.setattr(render_mod, "_tight_crop_video", lambda: "TC[comp]")
+
+    with caplog.at_level("INFO"):
+        render_mod.render("vid1", 0, 0.0, 20.0, "confident")
+
+    assert any("failed the corner-proximity check" in r.message for r in caplog.records)
+    assert any("x=184" in r.message and "y=671" in r.message for r in caplog.records)
+
+
+def test_no_face_at_all_does_not_log_the_missed_facecam_message(tmp_path, monkeypatch, caplog):
+    # The ordinary podcast-style case (nothing detected) must NOT be
+    # confused with the "found but rejected" edge case above.
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(render_mod, "find_face_region", lambda *a, **k: None)
+    monkeypatch.setattr(render_mod, "_tight_crop_video", lambda: "TC[comp]")
+
+    with caplog.at_level("INFO"):
+        render_mod.render("vid1", 0, 0.0, 20.0, "confident")
+
+    assert not any("failed the corner-proximity check" in r.message for r in caplog.records)
+
+
 def test_explicit_tight_crop_skips_detection_entirely(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
 

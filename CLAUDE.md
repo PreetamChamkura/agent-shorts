@@ -243,7 +243,7 @@ Both panels come from the SAME source (no separate gameplay file, unlike split s
 
 Selected automatically — not a manual `--composition` choice like split_screen above. `render()` runs face detection (`clipper.face_detect`) against the clip's own footage whenever `composition` is left unset; `facecam_split` is used only when a small corner facecam is actually found, otherwise `tight_crop`. A podcast-style source (subject fills the frame, e.g. a wide two-shot with no PIP overlay) always falls back to `tight_crop` unchanged.
 
-Known limitation: corner detection currently checks whether the facecam's *center* falls within `CORNER_MARGIN_FRACTION` (0.25) of both a horizontal and vertical edge. A real facecam positioned with some vertical margin above the game's own HUD (confirmed on a real clip) can fail this check and fall back to `tight_crop` — a missed optimization, not a broken render, and the safer failure direction versus the alternative (incorrectly split-screening a real podcast face, confirmed as a real false-positive risk during testing). Revisit with more real facecam layouts before loosening the margin.
+Known limitation (see Known issues below): corner detection currently checks whether the facecam's *center* falls within `CORNER_MARGIN_FRACTION` (0.25) of both a horizontal and vertical edge. A real facecam positioned with some vertical margin above the game's own HUD (confirmed on a real clip) can fail this check and fall back to `tight_crop` — a missed optimization, not a broken render, and the safer failure direction versus the alternative (incorrectly split-screening a real podcast face, confirmed as a real false-positive risk during testing). Revisit with more real facecam layouts before loosening the margin.
 
 ### Tail, both compositions
 
@@ -291,6 +291,12 @@ Switch for:
 Don't switch for routine work: stage scaffolding, file I/O, subprocess
 wrappers, config, tests, straightforward bug fixes. That's the majority of
 this codebase and Sonnet handles it well.
+
+## Known issues
+
+Real, confirmed limitations left as-is on purpose — not TODOs, not forgotten. Recorded here so they're not rediscovered from scratch.
+
+- **`is_small_corner_facecam`'s corner-proximity check misses some real facecams.** A facecam positioned with enough vertical margin above the game's own HUD can fall outside `CORNER_MARGIN_FRACTION` (0.25) and fall back to `tight_crop` instead of `facecam_split` — confirmed on a real clip. Loosening the margin was tried and rejected: it reintroduces the exact false positive layer 2 was built to avoid (a real podcast face misclassifying as a facecam). The two real cases don't separate cleanly on corner-center distance alone. Left as-is because the failure direction is the safe one — a missed optimization (graceful fallback to a known-good composition), not a broken render. `render()` logs this distinctly (`"failed the corner-proximity check"`) whenever it fires, so real frequency is visible over time. Revisit with more real facecam layouts before touching the margin again.
 
 ## Conventions
 
