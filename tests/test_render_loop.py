@@ -7,9 +7,9 @@ verified separately against actual ffmpeg output.
 from __future__ import annotations
 
 from clipper import render as render_mod
+from clipper.frames import mean_abs_diff
 from clipper.render import (
     LOOP_MOTION_THRESHOLD,
-    _mean_abs_diff,
     _snap_loop_end_forward,
     pick_loop_freeze_end,
 )
@@ -38,15 +38,15 @@ def test_snap_loop_end_forward_before_all_words_returns_raw():
 # --- frame diffing ------------------------------------------------------------
 
 
-def test_mean_abs_diff_identical_frames_is_zero():
+def testmean_abs_diff_identical_frames_is_zero():
     frame = bytes([100] * 16)
-    assert _mean_abs_diff(frame, frame) == 0.0
+    assert mean_abs_diff(frame, frame) == 0.0
 
 
-def test_mean_abs_diff_measures_magnitude():
+def testmean_abs_diff_measures_magnitude():
     a = bytes([0] * 16)
     b = bytes([10] * 16)
-    assert _mean_abs_diff(a, b) == 10.0
+    assert mean_abs_diff(a, b) == 10.0
 
 
 # --- pick_loop_freeze_end: search logic, ffmpeg extraction mocked -----------

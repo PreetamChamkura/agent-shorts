@@ -53,6 +53,7 @@ from pathlib import Path
 
 from .ass import Word, build_ass
 from .ffmpeg import probe_duration, run_ffmpeg, run_ffprobe
+from .frames import mean_abs_diff, read_pgm_gray
 from .paths import CAPTION_FONT, GAMEPLAY_DIR, WATERMARK_FONT, work_dir
 from .styles import style_for_tone
 
@@ -261,37 +262,6 @@ def _snap_loop_end_forward(words: list[dict], raw_end: float) -> float:
     return raw_end
 
 
-def _read_pgm_gray(path: Path) -> bytes:
-    """Parse a binary grayscale PGM (P5) into raw pixel bytes. No imaging
-    library needed — PGM is a trivial fixed format, unlike PNG/JPEG."""
-    data = path.read_bytes()
-    if not data.startswith(b"P5"):
-        raise ValueError(f"not a binary PGM: {path}")
-    tokens: list[bytes] = []
-    i = 2
-    while len(tokens) < 3:
-        while data[i : i + 1].isspace():
-            i += 1
-        if data[i : i + 1] == b"#":
-            while data[i : i + 1] not in (b"\n", b""):
-                i += 1
-            continue
-        j = i
-        while not data[j : j + 1].isspace():
-            j += 1
-        tokens.append(data[i:j])
-        i = j
-    width, height, _maxval = (int(t) for t in tokens)
-    i += 1  # the single whitespace byte separating the header from pixel data
-    return data[i : i + width * height]
-
-
-def _mean_abs_diff(a: bytes, b: bytes) -> float:
-    """Mean absolute per-pixel difference between two equal-length grayscale
-    frames — a coarse but adequate "how much moved" signal."""
-    return sum(abs(x - y) for x, y in zip(a, b, strict=True)) / len(a)
-
-
 def _extract_loop_candidate_frames(source: str, clip_end_abs: float, tmp_dir: Path) -> list[bytes]:
     """LOOP_SEARCH_FRAMES+1 small grayscale frames ending at ``clip_end_abs``
     (absolute seconds into ``source``), oldest first. The extra leading frame
@@ -317,7 +287,7 @@ def _extract_loop_candidate_frames(source: str, clip_end_abs: float, tmp_dir: Pa
         ]
     )
     frames = sorted(tmp_dir.glob("f_*.pgm"))
-    return [_read_pgm_gray(f) for f in frames]
+    return [read_pgm_gray(f) for f in frames]
 
 
 def pick_loop_freeze_end(source: str, clip_end_abs: float) -> float:
@@ -339,7 +309,7 @@ def pick_loop_freeze_end(source: str, clip_end_abs: float) -> float:
 
         for offset in range(len(frames) - 1):
             idx = len(frames) - 1 - offset
-            diff = _mean_abs_diff(frames[idx], frames[idx - 1])
+            diff = mean_abs_diff(frames[idx], frames[idx - 1])
             if diff <= LOOP_MOTION_THRESHOLD:
                 adjusted = round(clip_end_abs - offset / 30.0, 3)
                 if offset:

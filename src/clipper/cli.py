@@ -38,9 +38,13 @@ another. Subcommands:
       from the Pexels and Pixabay video APIs and writes sources.json.
 
   clipper fetch-clips CHANNEL [--limit N] [--since T] [--until T] [--out PATH]
+                              [--no-visual-gate]
       setup tool, not a stage. Lists a Twitch channel's clips via the Helix
-      API (id, view count, created date, title) — nothing downloaded.
-      Sanity-check the list before running `clipper clip` on any of them.
+      API (id, view count, created date, title) — nothing downloaded. Runs
+      the layer-1 visual pre-filter (clipper.visual_gate) on each candidate's
+      thumbnail unless --no-visual-gate is passed; rejects only near-blank
+      frames, logs scores for everything. Sanity-check the list before
+      running `clipper clip` on any of them.
 
 --start/--end/--tone are given together or not at all; a partial set is an
 error rather than a half-manual guess. Manual mode never mixes in VO (there is
@@ -182,6 +186,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     fetch_clips_p.add_argument("--until", help="RFC3339 timestamp — only clips created before this")
     fetch_clips_p.add_argument("--out", help="also write the fetched list as JSON to this path")
+    fetch_clips_p.add_argument(
+        "--no-visual-gate",
+        action="store_true",
+        help="skip the layer-1 thumbnail pre-filter (stage 2b visual gate)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -313,6 +322,7 @@ def main(argv: list[str] | None = None) -> None:
 
     elif args.command == "fetch-clips":
         from .twitch import fetch_clips, get_app_access_token, get_broadcaster_id
+        from .visual_gate import screen_clips_layer1
 
         client_id = os.environ.get("TWITCH_CLIENT_ID")
         if not client_id:
@@ -330,12 +340,30 @@ def main(argv: list[str] | None = None) -> None:
             started_at=args.since,
             ended_at=args.until,
         )
+        if not args.no_visual_gate:
+            clips = screen_clips_layer1(clips)
+
+        n_rejected = 0
         for c in clips:
+            gate = (c.get("visual_gate") or {}).get("layer_1")
+            if gate is None:
+                status = ""
+            elif gate["passed"]:
+                status = (
+                    f"[pass  var={gate['variance']:.0f} dark={gate['dark_fraction']:.2f} "
+                    f"edge={gate['edge_density']:.1f}] "
+                )
+            else:
+                status = "[REJECT layer1] "
+                n_rejected += 1
             print(
-                f"{c['id']:<28} views={c['view_count']:>8,}  {c['created_at']}  "
+                f"{status}{c['id']:<28} views={c['view_count']:>8,}  {c['created_at']}  "
                 f"{c['duration']:>4.0f}s  {c['title'][:55]}"
             )
-        print(f"\n{len(clips)} clip(s) for {args.channel} — nothing downloaded yet")
+        summary = f"\n{len(clips)} clip(s) for {args.channel}"
+        if not args.no_visual_gate:
+            summary += f" — {n_rejected} rejected by layer 1, {len(clips) - n_rejected} passed"
+        print(summary + " — nothing downloaded yet")
         if args.out:
             from pathlib import Path
 
