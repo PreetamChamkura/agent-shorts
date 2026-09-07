@@ -292,6 +292,7 @@ def test_judge_clip_maps_best_frame_index_to_its_timestamp(tmp_path, monkeypatch
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,
+            "best_frame_reason": "Frame 2: he's mid-laugh, the clearest reaction of the three.",
         },
     )
 
@@ -320,6 +321,7 @@ def test_judge_clip_best_frame_index_accounts_for_extraction_gaps(tmp_path, monk
             "passed": True,
             "reason": "fine",
             "best_frame_index": 1,
+            "best_frame_reason": "Frame 1: the only frame with a visible reaction.",
         },
     )
 
@@ -350,6 +352,119 @@ def test_judge_clip_out_of_range_best_frame_index_falls_back_to_zero(tmp_path, m
 
     result = judge_clip("vid1")
     assert result["best_frame_timestamp"] == 5.0
+
+
+# --- best_frame_reason accountability check --------------------------------
+# best_frame_reason must open with "Frame N:" naming the SAME N as
+# best_frame_index — mirrors clipper.select's why-field cross-check. A pick
+# that isn't accountable to its own stated reasoning falls back to frame 0,
+# same posture as an out-of-range index, and never affects `passed`.
+
+
+def test_referenced_frame_index_parses_leading_frame_n():
+    from clipper.visual_judge import _referenced_frame_index
+
+    assert _referenced_frame_index("Frame 2: he's mid-laugh.") == 2
+
+
+def test_referenced_frame_index_case_insensitive():
+    from clipper.visual_judge import _referenced_frame_index
+
+    assert _referenced_frame_index("frame 0: nothing happens.") == 0
+
+
+def test_referenced_frame_index_none_when_absent():
+    from clipper.visual_judge import _referenced_frame_index
+
+    assert _referenced_frame_index("He's mid-laugh in this one.") is None
+
+
+def test_referenced_frame_index_none_when_not_at_start():
+    # Anchored at the start on purpose — a reason mentioning another frame
+    # number in passing must not accidentally "match".
+    from clipper.visual_judge import _referenced_frame_index
+
+    assert _referenced_frame_index("Unlike frame 2, this frame shows nothing.") is None
+
+
+def test_judge_clip_best_frame_reason_matching_index_is_trusted(tmp_path, monkeypatch):
+    import clipper.visual_judge as vj
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(vj, "_sample_timestamps", lambda duration, n: [1.0, 2.0, 3.0])
+    monkeypatch.setattr(
+        vj,
+        "_extract_preview_frame",
+        lambda source, ts, video_fc, out_path: out_path.write_bytes(b"x"),
+    )
+    monkeypatch.setattr(
+        vj,
+        "_call_model",
+        lambda client, prompt, paths_, model: {
+            "passed": True,
+            "reason": "fine",
+            "best_frame_index": 2,
+            "best_frame_reason": "Frame 2: clear smile, the most animated of the three.",
+        },
+    )
+
+    result = judge_clip("vid1")
+    assert result["best_frame_timestamp"] == 3.0
+    assert result["best_frame_reason"] == "Frame 2: clear smile, the most animated of the three."
+
+
+def test_judge_clip_best_frame_reason_mismatch_falls_back_to_zero(tmp_path, monkeypatch, caplog):
+    import clipper.visual_judge as vj
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(vj, "_sample_timestamps", lambda duration, n: [1.0, 2.0, 3.0])
+    monkeypatch.setattr(
+        vj,
+        "_extract_preview_frame",
+        lambda source, ts, video_fc, out_path: out_path.write_bytes(b"x"),
+    )
+    monkeypatch.setattr(
+        vj,
+        "_call_model",
+        lambda client, prompt, paths_, model: {
+            "passed": True,
+            "reason": "fine",
+            "best_frame_index": 2,
+            # Names a different frame than the index it's attached to.
+            "best_frame_reason": "Frame 0: nothing much happens here.",
+        },
+    )
+
+    with caplog.at_level("WARNING"):
+        result = judge_clip("vid1")
+
+    assert result["best_frame_timestamp"] == 1.0  # fell back to frame 0
+    assert any("pick isn't accountable" in r.message for r in caplog.records)
+
+
+def test_judge_clip_best_frame_reason_missing_falls_back_to_zero(tmp_path, monkeypatch):
+    import clipper.visual_judge as vj
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(vj, "_sample_timestamps", lambda duration, n: [1.0, 2.0, 3.0])
+    monkeypatch.setattr(
+        vj,
+        "_extract_preview_frame",
+        lambda source, ts, video_fc, out_path: out_path.write_bytes(b"x"),
+    )
+    monkeypatch.setattr(
+        vj,
+        "_call_model",
+        lambda client, prompt, paths_, model: {
+            "passed": True,
+            "reason": "fine",
+            "best_frame_index": 2,
+            "best_frame_reason": "This one is the most engaging.",  # no "Frame N:" at all
+        },
+    )
+
+    result = judge_clip("vid1")
+    assert result["best_frame_timestamp"] == 1.0  # fell back to frame 0
 
 
 def test_judge_clip_default_model_is_sonnet():

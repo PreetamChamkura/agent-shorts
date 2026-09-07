@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import tempfile
 from pathlib import Path
 
@@ -76,10 +77,29 @@ _JUDGE_SCHEMA = {
         # not supported", a real 400 from a live call). Range is enforced in
         # Python instead (judge_clip clamps out-of-range values to 0).
         "best_frame_index": {"type": "integer"},
+        "best_frame_reason": {"type": "string"},
     },
-    "required": ["passed", "reason", "best_frame_index"],
+    "required": ["passed", "reason", "best_frame_index", "best_frame_reason"],
     "additionalProperties": False,
 }
+
+# best_frame_reason must open with "Frame N:" naming the SAME N as
+# best_frame_index (prompts/visual_judge.md's field rule) — mirrors
+# clipper.select's why-field cross-check (why_is_located / the payoff-quote
+# search): the model must commit to a checkable claim about which frame it
+# means, not just describe a frame in prose disconnected from the index it
+# actually returned. Anchored at the start of the string (not searched
+# anywhere in it) so a reason that mentions multiple frame numbers in
+# passing can't accidentally "match" on the wrong one.
+_FRAME_REF_RE = re.compile(r"^\s*frame\s+(\d+)\s*:", re.IGNORECASE)
+
+
+def _referenced_frame_index(best_frame_reason: str) -> int | None:
+    """The frame number best_frame_reason claims to justify, or None if it
+    doesn't open with the required "Frame N:" — same "unparseable means
+    untrustworthy" posture as clipper.select.why_is_located."""
+    m = _FRAME_REF_RE.match(best_frame_reason or "")
+    return int(m.group(1)) if m else None
 
 
 def _sample_timestamps(duration: float, n: int) -> list[float]:
@@ -229,7 +249,8 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
     tuning a later stage) must never re-pay for the same clip's verdict
     unless force=True, same caching discipline as every other stage.
     Returns {"passed": bool, "reason": str, "composition": str,
-    "frames_sampled": int, "best_frame_timestamp": float}.
+    "frames_sampled": int, "best_frame_timestamp": float,
+    "best_frame_reason": str}.
     ``best_frame_timestamp`` is an absolute second into source.mp4 — the model
     already looked at these frames to make the pass/reject call, so it also
     names which one is most worth using as a thumbnail (CLAUDE.md thumbnail
@@ -237,6 +258,14 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
     and asking again. Consumed by clipper.thumbnail when it's inside the
     final segment's own [start, end]; falls back to its own cheap heuristic
     otherwise (e.g. select_clip trimmed the segment past this timestamp).
+
+    ``best_frame_reason`` must open with "Frame N:" naming the same N as the
+    index actually used (prompts/visual_judge.md's field rule) — cross-checked
+    here the same way clipper.select checks `why` against its own payoff
+    quote: a reason that names a different frame, or no frame at all, means
+    the pick isn't accountable to its own stated reasoning, so best_index
+    falls back to 0 rather than trusting it. This never affects `passed` —
+    only which frame clipper.thumbnail is told to prefer.
     """
     wd = work_dir(video_id)
     source = wd / "source.mp4"
@@ -290,18 +319,38 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
     # gaps (see the loop above: only successfully-extracted frames are
     # appended). sampled_timestamps was built in lockstep with frame_paths
     # specifically so this index always lands on the real timestamp the model
-    # was actually looking at. Clamped defensively — a model returning an
-    # out-of-range index shouldn't crash a passing verdict, just fall back to
-    # the first sampled frame.
-    best_index = int(verdict.get("best_frame_index", 0))
-    if not (0 <= best_index < len(sampled_timestamps)):
+    # was actually looking at.
+    raw_best_index = int(verdict.get("best_frame_index", 0))
+    best_frame_reason = str(verdict.get("best_frame_reason", "")).strip()
+    referenced_index = _referenced_frame_index(best_frame_reason)
+
+    # Two independent, distinctly-logged reasons a pick can't be trusted —
+    # same "unparseable/inconsistent means untrustworthy" posture as
+    # clipper.select's why-field checks, and the same "log distinctly so
+    # real frequency is visible" convention as render.py's corner-check
+    # fallback. Both fall back to frame 0 rather than crashing a passing
+    # verdict over a secondary (thumbnail-only) data point.
+    if not (0 <= raw_best_index < len(sampled_timestamps)):
         log.warning(
             "visual_judge: %s best_frame_index=%d out of range for %d sampled frame(s) — using 0",
             video_id,
-            best_index,
+            raw_best_index,
             len(sampled_timestamps),
         )
         best_index = 0
+    elif referenced_index != raw_best_index:
+        log.warning(
+            "visual_judge: %s best_frame_reason doesn't name best_frame_index=%d (parsed "
+            "reference: %s) — pick isn't accountable to its own reasoning, using frame 0. "
+            "best_frame_reason: %r",
+            video_id,
+            raw_best_index,
+            referenced_index,
+            best_frame_reason,
+        )
+        best_index = 0
+    else:
+        best_index = raw_best_index
     best_frame_timestamp = sampled_timestamps[best_index]
 
     result = {
@@ -310,6 +359,7 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
         "composition": composition,
         "frames_sampled": len(frame_paths),
         "best_frame_timestamp": best_frame_timestamp,
+        "best_frame_reason": best_frame_reason,
     }
     log.info(
         "visual_judge: %s %s (%s, %d frame(s)) — %s",
