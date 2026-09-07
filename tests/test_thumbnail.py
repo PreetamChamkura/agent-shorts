@@ -152,7 +152,7 @@ def test_select_timestamp_falls_back_when_layer3_frame_outside_segment(tmp_path,
     monkeypatch.setattr(thumb_mod, "_pick_engaging_frame_cheap", lambda *a, **k: 15.0)
 
     ts, source = select_thumbnail_timestamp("vid1", 10.0, 20.0, "tight_crop", None)
-    assert (ts, source) == (15.0, "fallback")
+    assert (ts, source) == (15.0, "fallback:punchline")
 
 
 def test_select_timestamp_falls_back_when_no_visual_judge_json(tmp_path, monkeypatch):
@@ -160,7 +160,7 @@ def test_select_timestamp_falls_back_when_no_visual_judge_json(tmp_path, monkeyp
     monkeypatch.setattr(thumb_mod, "_pick_engaging_frame_cheap", lambda *a, **k: 7.0)
 
     ts, source = select_thumbnail_timestamp("vid1", 0.0, 20.0, "tight_crop", None)
-    assert (ts, source) == (7.0, "fallback")
+    assert (ts, source) == (7.0, "fallback:punchline")
 
 
 def test_select_timestamp_forwards_punchline_at_to_fallback(tmp_path, monkeypatch):
@@ -172,6 +172,123 @@ def test_select_timestamp_forwards_punchline_at_to_fallback(tmp_path, monkeypatc
 
     select_thumbnail_timestamp("vid1", 0.0, 20.0, "tight_crop", None, 15.0)
     assert seen[0][-1] == 15.0  # punchline_at forwarded positionally
+
+
+def test_select_timestamp_facecam_split_fallback_ignores_anchor_entirely(tmp_path, monkeypatch):
+    # facecam_split's fallback must never even attempt quote-location — no
+    # words.json read, no anchor resolution, just the plain "fallback" tag.
+    _setup(tmp_path, monkeypatch)  # no visual_judge.json — forces the fallback path
+
+    def fail_resolve(*a, **k):
+        pytest.fail("facecam_split's fallback must not resolve an anchor at all")
+
+    monkeypatch.setattr(thumb_mod, "_resolve_anchor", fail_resolve)
+    monkeypatch.setattr(thumb_mod, "_pick_engaging_frame_cheap", lambda *a, **k: 3.0)
+
+    ts, source = select_thumbnail_timestamp(
+        "vid1", 0.0, 20.0, "facecam_split", None, 12.0, '"A QUOTE"'
+    )
+    assert (ts, source) == (3.0, "fallback")
+
+
+# --- _locate_quoted_phrase / _resolve_anchor: anchor on the quote's own ----
+# spoken timestamp, not blindly on punchline_at. Real bug found from real
+# output: a segment's thumbnail_text was spoken 15+ seconds away from its
+# own punchline_at in the same segment — centering on punchline_at picked a
+# real person, but not the one saying the quoted line.
+
+
+def test_locate_quoted_phrase_finds_contiguous_run():
+    words = [
+        {"word": "Where", "start": 101.46, "end": 101.58},
+        {"word": "did", "start": 101.58, "end": 101.68},
+        {"word": "you", "start": 101.68, "end": 101.76},
+        {"word": "go", "start": 101.76, "end": 101.88},
+        {"word": "to", "start": 101.88, "end": 101.98},
+        {"word": "medical", "start": 101.98, "end": 102.12},
+        {"word": "school?", "start": 102.12, "end": 102.40},
+    ]
+    assert thumb_mod._locate_quoted_phrase(words, "Where did you go to medical school") == (
+        101.46,
+        102.40,
+    )
+
+
+def test_locate_quoted_phrase_strips_wrapping_quote_marks():
+    words = [
+        {"word": "Where", "start": 101.46, "end": 101.58},
+        {"word": "did", "start": 101.58, "end": 101.68},
+    ]
+    # thumbnail_text is styled with literal quote marks — not part of the
+    # spoken words, must be stripped by normalization like any punctuation.
+    assert thumb_mod._locate_quoted_phrase(words, '"Where did"') == (101.46, 101.68)
+
+
+def test_locate_quoted_phrase_none_when_paraphrased():
+    # Real regression case: thumbnail_text said "MED SCHOOL", the transcript
+    # actually says "medical school" — not a verbatim quote, must not match.
+    words = [
+        {"word": "Where", "start": 101.46, "end": 101.58},
+        {"word": "did", "start": 101.58, "end": 101.68},
+        {"word": "you", "start": 101.68, "end": 101.76},
+        {"word": "go", "start": 101.76, "end": 101.88},
+        {"word": "to", "start": 101.88, "end": 101.98},
+        {"word": "medical", "start": 101.98, "end": 102.12},
+        {"word": "school?", "start": 102.12, "end": 102.40},
+    ]
+    assert thumb_mod._locate_quoted_phrase(words, "Where did you go to med school") is None
+
+
+def test_resolve_anchor_uses_quote_location_when_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    wd = tmp_path / "vid1"
+    wd.mkdir()
+    words = [
+        {"word": "he's", "start": 30.0, "end": 30.3},
+        {"word": "affordable.", "start": 30.3, "end": 30.8},
+    ]
+    (wd / "words.json").write_text(json.dumps({"words": words}))
+
+    anchor, source = thumb_mod._resolve_anchor("vid1", 0.0, 40.0, '"he\'s affordable"', 15.0)
+    assert source == "quote"
+    assert anchor == (30.0 + 30.8) / 2
+
+
+def test_resolve_anchor_falls_back_to_punchline_when_not_a_quote(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    wd = tmp_path / "vid1"
+    wd.mkdir()
+    words = [{"word": "unrelated", "start": 5.0, "end": 5.5}]
+    (wd / "words.json").write_text(json.dumps({"words": words}))
+
+    anchor, source = thumb_mod._resolve_anchor("vid1", 0.0, 40.0, "A REACTION PHRASE", 15.0)
+    assert (anchor, source) == (15.0, "punchline")
+
+
+def test_resolve_anchor_falls_back_to_midpoint_when_no_punchline_or_quote(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    wd = tmp_path / "vid1"
+    wd.mkdir()
+    # No words.json at all — the long-form path before Layer 3 or a segment
+    # predating this feature.
+    anchor, source = thumb_mod._resolve_anchor("vid1", 10.0, 30.0, "SOMETHING", None)
+    assert (anchor, source) == (20.0, "punchline")
+
+
+def test_resolve_anchor_restricts_search_to_the_segments_own_words(tmp_path, monkeypatch):
+    # An identical phrase earlier in the video (outside [start, end]) must
+    # not be matched instead of nothing found within the segment itself.
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    wd = tmp_path / "vid1"
+    wd.mkdir()
+    words = [
+        {"word": "hello", "start": 5.0, "end": 5.5},  # outside [start, end]
+        {"word": "unrelated", "start": 25.0, "end": 25.5},  # inside, but not the phrase
+    ]
+    (wd / "words.json").write_text(json.dumps({"words": words}))
+
+    anchor, source = thumb_mod._resolve_anchor("vid1", 20.0, 30.0, '"hello"', 27.0)
+    assert (anchor, source) == (27.0, "punchline")
 
 
 # --- tight_crop's fallback face-gate: two real bugs found from real output -

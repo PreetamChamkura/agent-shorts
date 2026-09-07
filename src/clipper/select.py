@@ -75,6 +75,18 @@ VALID_PLACEMENTS = ("cold_open", "pre_punchline")
 THUMBNAIL_TEXT_MIN_WORDS = 3
 THUMBNAIL_TEXT_MAX_WORDS = 6
 
+# How far punchline_at may sit outside the quoted payoff's own real
+# transcript span before it's treated as drifted rather than ordinary
+# jitter — see validate_segment's punchline_at-vs-phrase-span check. Real
+# bug found from real output: a segment's punchline_at (112.0) sat 5.3s
+# before its own quoted payoff phrase actually started (117.30) — `end`
+# already covered the phrase (the existing check this one is next to), but
+# nothing had ever confirmed punchline_at itself wasn't off in the same way.
+# That drift fed real downstream mistakes: pre_punchline VO timing anchors
+# 1.2s before punchline_at, and clipper.thumbnail's fallback frame search
+# centers on it — both would land on the wrong moment.
+PUNCHLINE_DRIFT_TOLERANCE = 2.0
+
 # Placeholders in prompts/select.md. Substituted by explicit replace, never
 # str.format — the template contains a literal JSON example whose braces would
 # blow up any format-string parsing.
@@ -317,8 +329,11 @@ def _normalize_token(tok: str) -> str:
     return re.sub(r"[^a-z0-9']", "", tok.lower())
 
 
-def _find_phrase_end(words: list[dict], phrase: str, search_from: float) -> float | None:
-    """Where ``phrase``'s last word actually ends in ``words``.
+def _find_phrase_span(
+    words: list[dict], phrase: str, search_from: float
+) -> tuple[float, float] | None:
+    """(start, end) of ``phrase`` as a contiguous token run in ``words``, or
+    None if it isn't found verbatim.
 
     Searches only from shortly before ``search_from`` (the payoff marker)
     onward, so an earlier, unrelated occurrence of the same words can't be
@@ -326,6 +341,11 @@ def _find_phrase_end(words: list[dict], phrase: str, search_from: float) -> floa
     run in the transcript — the model paraphrased rather than quoting
     verbatim (confirmed to happen on real output), and no reliable check is
     possible then; callers should skip enforcement rather than guess.
+
+    The single search implementation both _find_phrase_end and
+    validate_segment's punchline_at check build on, so a start and an end
+    derived from the same call always refer to the SAME located occurrence
+    rather than two independent searches risking different matches.
     """
     tokens = [t for t in (_normalize_token(tok) for tok in phrase.split()) if t]
     if not tokens:
@@ -335,8 +355,24 @@ def _find_phrase_end(words: list[dict], phrase: str, search_from: float) -> floa
     n = len(tokens)
     for i in range(len(norm_words) - n + 1):
         if norm_words[i : i + n] == tokens:
-            return float(candidates[i + n - 1]["end"])
+            return float(candidates[i]["start"]), float(candidates[i + n - 1]["end"])
     return None
+
+
+def _find_phrase_end(words: list[dict], phrase: str, search_from: float) -> float | None:
+    """Where ``phrase``'s last word actually ends — see _find_phrase_span."""
+    span = _find_phrase_span(words, phrase, search_from)
+    return span[1] if span else None
+
+
+def _distance_from_span(value: float, span_start: float, span_end: float) -> float:
+    """0 if ``value`` falls inside [span_start, span_end], else how far
+    outside it sits (from the nearer edge)."""
+    if value < span_start:
+        return span_start - value
+    if value > span_end:
+        return value - span_end
+    return 0.0
 
 
 def validate_segment(raw: dict, words: list[dict]) -> dict | None:
@@ -383,10 +419,12 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
     # quote falls back to the checks below rather than risking a
     # false-positive rejection on transcription noise.
     payoff_quote = _extract_payoff_quote(why)
+    phrase_span = None
     if payoff_quote:
         marker = _extract_payoff_marker(why) or start
-        phrase_end = _find_phrase_end(words, payoff_quote, marker)
-        if phrase_end is not None and phrase_end > end:
+        phrase_span = _find_phrase_span(words, payoff_quote, marker)
+        if phrase_span is not None and phrase_span[1] > end:
+            phrase_end = phrase_span[1]
             if phrase_end - start <= MAX_DURATION:
                 log.info(
                     "select: %r end %.2f fell short of quoted payoff (ends %.2f) — extending",
@@ -403,6 +441,33 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
                     MAX_DURATION,
                 )
                 return None
+
+    # punchline_at must actually fall within (or very close to) the quoted
+    # payoff's own real span — not just have `end` cover it, which the check
+    # above only confirms about the SEGMENT boundary, not this specific
+    # timestamp. Real bug found from real output: end already covered a
+    # payoff phrase whose real span was 117.30-119.60, while punchline_at
+    # itself sat at 112.0 — 5.3s before the phrase even started. That drift
+    # is invisible to the end-coverage check alone. Corrected to the
+    # phrase's own start (where the payoff actually begins landing) rather
+    # than dropping an otherwise-good segment over one timestamp field —
+    # same posture as extending `end` above. Only enforced when the quote is
+    # locatable, same as the end-coverage check.
+    if phrase_span is not None:
+        phrase_start, phrase_end = phrase_span
+        drift = _distance_from_span(punchline_at, phrase_start, phrase_end)
+        if drift > PUNCHLINE_DRIFT_TOLERANCE:
+            log.warning(
+                "select: %r punchline_at=%.2f is %.1fs from the quoted payoff's real span "
+                "%.2f-%.2f — correcting to %.2f",
+                hook,
+                punchline_at,
+                drift,
+                phrase_start,
+                phrase_end,
+                phrase_start,
+            )
+            punchline_at = phrase_start
 
     duration = end - start
     if not (MIN_DURATION <= duration <= MAX_DURATION):

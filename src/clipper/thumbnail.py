@@ -36,22 +36,38 @@ nothing to do with the facecam.
 For every other composition (tight_crop in practice), the fallback requires
 a CONFIRMED-recurring face — find_face_region()'s own temporal clustering
 over the search window, not a bare single-frame Haar check — before a
-candidate is even scored, searched in a window centered on punchline_at
-rather than spread across the whole segment. Two real bugs found from real
-output, in sequence: first, an unconditional highest-edge_density pick
-chose a visually busy but completely person-free B-roll shot (a product
-shelf) near the payoff, since thumbnail_text is usually a quoted line of
-dialogue that needs a visible speaker to read as anything; then a bare
-single-frame Haar "does this exact frame contain a face" check, added to
-fix that, itself let the SAME B-roll frame through — Haar threw 4
-false-positive hits on bottle labels/caps in that one frame, and because it
-was also the busiest-looking frame, edge_density picked it right back.
-Requiring the hit to match an ALREADY-confirmed recurring position (see
-_pick_engaging_frame_tight_crop / _frame_matches_confirmed_face) is what
-actually fixes it: a one-off texture misfire doesn't recur at the same
-spot across temporally-spread samples the way a real, present subject does.
+candidate is even scored, searched in a window centered on an ANCHOR
+timestamp rather than spread across the whole segment. Three real bugs
+found from real output, in sequence:
+
+1. An unconditional highest-edge_density pick chose a visually busy but
+   completely person-free B-roll shot (a product shelf) near the payoff,
+   since thumbnail_text is usually a quoted line of dialogue that needs a
+   visible speaker to read as anything.
+2. A bare single-frame Haar "does this exact frame contain a face" check,
+   added to fix that, itself let the SAME B-roll frame through — Haar threw
+   4 false-positive hits on bottle labels/caps in that one frame, and
+   because it was also the busiest-looking frame, edge_density picked it
+   right back. Requiring the hit to match an ALREADY-confirmed recurring
+   position (find_face_region's own clustering over the search window, see
+   _pick_engaging_frame_tight_crop / _frame_matches_confirmed_face) fixed
+   this: a one-off texture misfire doesn't recur at the same spot across
+   temporally-spread samples the way a real, present subject does.
+3. Centering the search on punchline_at unconditionally: a real segment's
+   thumbnail_text was a verbatim quote spoken 15+ seconds away from
+   punchline_at (the payoff) in the same segment — the search picked a real
+   person, but not the one actually saying the quoted line, because nothing
+   had confirmed the two timestamps were even close. _resolve_anchor now
+   locates thumbnail_text's own spoken span in the transcript (same
+   contiguous-token-run matching clipper.select uses for why's quoted
+   payoff phrase, see _locate_quoted_phrase) and anchors there when it's a
+   genuine verbatim quote; only falls back to punchline_at when
+   thumbnail_text is a paraphrase/reaction phrase instead (select.md
+   explicitly allows either) and the quote can't be located.
+
 This does not touch facecam_split's own logic at all — that panel is, by
-construction, already where a face would be.
+construction, already where a face would be, and its fallback (on the rare
+occasion it even runs) ignores both punchline_at and thumbnail_text.
 
 ## Composition + text treatment
 
@@ -406,15 +422,23 @@ def _frame_matches_confirmed_face(source: str, ts: float, confirmed: dict) -> bo
 
 
 def _pick_engaging_frame_tight_crop(
-    source: str, start: float, end: float, punchline_at: float | None
+    source: str, start: float, end: float, anchor_hint: float | None
 ) -> float:
     """tight_crop's fallback pick: highest edge_density among candidates
     that actually show a CONFIRMED-recurring face, searched in a window
-    centered on ``punchline_at`` (the quoted thumbnail_text usually IS the
-    payoff line, and CLAUDE.md places the payoff in the last third of the
-    segment, so a frame far from it is likely unrelated setup footage) —
-    widened once before giving up and falling back to the best faceless
-    frame across the whole segment.
+    centered on ``anchor_hint`` — widened once before giving up and falling
+    back to the best faceless frame across the whole segment.
+
+    ``anchor_hint`` is resolved by the caller (select_thumbnail_timestamp /
+    _resolve_anchor): thumbnail_text's own spoken timestamp when it's a
+    verbatim quote locatable in the transcript, else punchline_at. This
+    function doesn't know or care which — it just centers the search on
+    whatever timestamp it's given, defaulting to the segment midpoint if
+    None. Real bug found from real output that made the distinction matter:
+    thumbnail_text's quoted line and punchline_at's payoff can be 15+
+    seconds apart in the same segment — centering blindly on punchline_at
+    picked a frame in the gap between them, showing a real person but not
+    the one saying the quoted line.
 
     "Confirmed-recurring" means find_face_region() over the search window
     itself first — its own temporal clustering, not a bare single-frame
@@ -422,7 +446,7 @@ def _pick_engaging_frame_tight_crop(
     required this). A window where nothing recurs (find_face_region returns
     None) is treated exactly like a window with no face candidates at all.
     """
-    anchor = punchline_at if punchline_at is not None else (start + end) / 2
+    anchor = anchor_hint if anchor_hint is not None else (start + end) / 2
     for radius in (_FACE_SEARCH_INITIAL_RADIUS, _FACE_SEARCH_WIDENED_RADIUS):
         window_start = max(start, anchor - radius)
         window_end = min(end, anchor + radius)
@@ -441,7 +465,7 @@ def _pick_engaging_frame_tight_crop(
             best_ts = _best_by_edge_density(source, face_candidates, None)
             if best_ts is not None:
                 log.info(
-                    "thumbnail: confirmed a recurring face within %.1fs of punchline_at "
+                    "thumbnail: confirmed a recurring face within %.1fs of the anchor "
                     "(%.2fs) — using %.2fs",
                     radius,
                     anchor,
@@ -450,7 +474,7 @@ def _pick_engaging_frame_tight_crop(
                 return best_ts
 
     log.warning(
-        "thumbnail: no confirmed-recurring face found within %.1fs of punchline_at (%.2fs) in "
+        "thumbnail: no confirmed-recurring face found within %.1fs of the anchor (%.2fs) in "
         "[%.2f, %.2f] even after widening — falling back to the best faceless frame in the "
         "full segment span",
         _FACE_SEARCH_WIDENED_RADIUS,
@@ -470,7 +494,7 @@ def _pick_engaging_frame_cheap(
     end: float,
     composition: str,
     face_region: dict | None,
-    punchline_at: float | None = None,
+    anchor_hint: float | None = None,
 ) -> float:
     """Fallback frame pick when Layer 3's data isn't usable (see module
     docstring): an untuned pixel-stats heuristic, not a vision judgment,
@@ -479,11 +503,12 @@ def _pick_engaging_frame_cheap(
     render.
 
     facecam_split scores ONLY the facecam panel's own source region
-    (unchanged by the tight_crop fix below — that panel is, by construction,
-    where a face would be, and Layer 3 already covers this composition's
-    normal case, so this rarely even runs for it). Every other composition
-    goes through _pick_engaging_frame_tight_crop's face-gated,
-    punchline-centered search instead of a plain full-segment scan.
+    (unchanged by the tight_crop fix below, and ``anchor_hint`` is unused
+    for it — that panel is, by construction, where a face would be, and
+    Layer 3 already covers this composition's normal case, so this rarely
+    even runs for it). Every other composition goes through
+    _pick_engaging_frame_tight_crop's face-gated, anchor-centered search
+    instead of a plain full-segment scan.
     """
     if composition == "facecam_split":
         crop_box = _facecam_panel_crop_box(face_region) if face_region else None
@@ -500,7 +525,83 @@ def _pick_engaging_frame_cheap(
         )
         return (start + end) / 2
 
-    return _pick_engaging_frame_tight_crop(source, start, end, punchline_at)
+    return _pick_engaging_frame_tight_crop(source, start, end, anchor_hint)
+
+
+def _normalize_phrase_token(tok: str) -> str:
+    """Same normalization clipper.select uses for its own why-field phrase
+    matching (_normalize_token) — duplicated per this project's stage-
+    independence convention rather than imported across stage modules."""
+    return re.sub(r"[^a-z0-9']", "", tok.lower())
+
+
+def _locate_quoted_phrase(words: list[dict], phrase: str) -> tuple[float, float] | None:
+    """(start, end) of ``phrase`` as a contiguous token run in ``words``, or
+    None if it isn't found verbatim.
+
+    Same approach as clipper.select._find_phrase_span (why's quoted payoff
+    cross-check), applied here to thumbnail_text instead — duplicated
+    rather than imported, same stage-independence reasoning as
+    _WARMUP_FRAMES/_evenly_spaced above. thumbnail_text is often wrapped in
+    literal quote marks ("...") as a styling convention, not part of the
+    spoken words — those get stripped by the same token normalization as
+    any other punctuation. Returns None when thumbnail_text is a paraphrase
+    or reaction phrase rather than a verbatim quote (select.md explicitly
+    allows either) — no reliable location is possible then, same posture as
+    the why-field case: callers fall back rather than guess.
+    """
+    tokens = [t for t in (_normalize_phrase_token(w) for w in phrase.split()) if t]
+    if not tokens:
+        return None
+    norm_words = [_normalize_phrase_token(w["word"]) for w in words]
+    n = len(tokens)
+    for i in range(len(norm_words) - n + 1):
+        if norm_words[i : i + n] == tokens:
+            return float(words[i]["start"]), float(words[i + n - 1]["end"])
+    return None
+
+
+def _resolve_anchor(
+    video_id: str,
+    start: float,
+    end: float,
+    thumbnail_text: str,
+    punchline_at: float | None,
+) -> tuple[float, str]:
+    """(anchor timestamp, source tag — "quote" or "punchline") to center
+    tight_crop's fallback face search on.
+
+    Prefers thumbnail_text's own spoken moment when it's a verbatim quote
+    locatable in the transcript: the thumbnail should show the person
+    actually saying the quoted line, not just someone visible near the
+    payoff. Falls back to punchline_at (or the segment midpoint, if that's
+    also unavailable) when thumbnail_text is a paraphrase/reaction phrase
+    instead — the normal case select.md explicitly allows, not an error.
+
+    Real bug found from real output: a segment's thumbnail_text ("Where did
+    you go to med school?") was spoken at 101-102s, while its punchline_at
+    (the payoff, "he's not the best, but he's very affordable") landed at
+    117-119s — 15+ seconds apart in the same segment. Centering blindly on
+    punchline_at picked a frame in the gap between them: a real person, but
+    not the one saying the quoted line.
+    """
+    words_path = work_dir(video_id) / "words.json"
+    if words_path.exists() and thumbnail_text.strip():
+        all_words = json.loads(words_path.read_text()).get("words", [])
+        segment_words = [w for w in all_words if start <= float(w["start"]) <= end]
+        located = _locate_quoted_phrase(segment_words, thumbnail_text)
+        if located is not None:
+            phrase_start, phrase_end = located
+            log.info(
+                "thumbnail: %s thumbnail_text located verbatim at %.2f-%.2fs — anchoring the "
+                "frame search there instead of punchline_at",
+                video_id,
+                phrase_start,
+                phrase_end,
+            )
+            return (phrase_start + phrase_end) / 2, "quote"
+
+    return (punchline_at if punchline_at is not None else (start + end) / 2), "punchline"
 
 
 def select_thumbnail_timestamp(
@@ -510,13 +611,15 @@ def select_thumbnail_timestamp(
     composition: str,
     face_region: dict | None,
     punchline_at: float | None = None,
+    thumbnail_text: str = "",
 ) -> tuple[float, str]:
     """Absolute source.mp4 timestamp for this clip's thumbnail, and a short
-    tag naming how it was picked ("layer3" or "fallback" — for logging and
-    tests, not shown to any end user). See module docstring for the
-    preference order. ``punchline_at`` centers tight_crop's fallback search
-    (see _pick_engaging_frame_tight_crop) — unused on the layer3 path and by
-    facecam_split's fallback.
+    tag naming how it was picked — "layer3", "fallback:quote" (tight_crop's
+    fallback, anchored on thumbnail_text's own located timestamp), or
+    "fallback:punchline" (anchored on punchline_at instead, see
+    _resolve_anchor) — for logging and tests, not shown to any end user.
+    See module docstring for the preference order. facecam_split's fallback
+    ignores both punchline_at and thumbnail_text (unaffected by this).
     """
     wd = work_dir(video_id)
     judge_path = wd / "visual_judge.json"
@@ -536,8 +639,15 @@ def select_thumbnail_timestamp(
             )
 
     source = str(wd / "source.mp4")
-    ts = _pick_engaging_frame_cheap(source, start, end, composition, face_region, punchline_at)
-    return ts, "fallback"
+    if composition == "facecam_split":
+        # Unaffected by this fix — see _pick_engaging_frame_cheap's own
+        # docstring on why facecam_split never uses an anchor at all.
+        ts = _pick_engaging_frame_cheap(source, start, end, composition, face_region, None)
+        return ts, "fallback"
+
+    anchor, anchor_source = _resolve_anchor(video_id, start, end, thumbnail_text, punchline_at)
+    ts = _pick_engaging_frame_cheap(source, start, end, composition, face_region, anchor)
+    return ts, f"fallback:{anchor_source}"
 
 
 def _extract_full_frame(source: str, ts: float, video_fc: str, out_path: Path) -> None:
@@ -641,7 +751,7 @@ def generate_thumbnail(
             )
 
     ts, pick_source = select_thumbnail_timestamp(
-        video_id, start, end, composition, face_region, punchline_at
+        video_id, start, end, composition, face_region, punchline_at, thumbnail_text
     )
     log.info(
         "thumbnail: n=%d composition=%s frame=%.2fs (source=%s)", n, composition, ts, pick_source

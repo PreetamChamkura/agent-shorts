@@ -10,9 +10,12 @@ from clipper import paths
 from clipper import select as select_mod
 from clipper.select import (
     MIN_DURATION,
+    PUNCHLINE_DRIFT_TOLERANCE,
+    _distance_from_span,
     _extract_payoff_marker,
     _extract_payoff_quote,
     _find_phrase_end,
+    _find_phrase_span,
     _snap_end_forward,
     build_windows,
     dedupe,
@@ -190,6 +193,54 @@ def test_find_phrase_end_ignores_earlier_unrelated_occurrence():
     assert _find_phrase_end(words, "very good", 118.0) == 118.8
 
 
+# --- _find_phrase_span: start+end of the SAME located occurrence -----------
+
+
+def test_find_phrase_span_returns_start_and_end_of_one_match():
+    words = [
+        {"word": "he's", "start": 117.30, "end": 117.52},
+        {"word": "not", "start": 117.52, "end": 117.64},
+        {"word": "the", "start": 117.64, "end": 117.80},
+        {"word": "best,", "start": 117.80, "end": 118.04},
+    ]
+    assert _find_phrase_span(words, "he's not the best", 117.0) == (117.30, 118.04)
+
+
+def test_find_phrase_span_none_when_not_found():
+    words = [{"word": "hello", "start": 0.0, "end": 0.5}]
+    assert _find_phrase_span(words, "goodbye world", 0.0) is None
+
+
+def test_find_phrase_end_and_span_agree_on_the_same_occurrence():
+    # Real regression risk of the refactor: _find_phrase_end must still
+    # return exactly the span's own end, not a separately-computed value.
+    words = [
+        {"word": "very", "start": 5.0, "end": 5.3},
+        {"word": "good.", "start": 5.3, "end": 5.6},
+        {"word": "he's", "start": 118.0, "end": 118.3},
+        {"word": "very", "start": 118.3, "end": 118.5},
+        {"word": "good.", "start": 118.5, "end": 118.8},
+    ]
+    span = _find_phrase_span(words, "very good", 118.0)
+    assert span == (118.3, 118.8)
+    assert _find_phrase_end(words, "very good", 118.0) == span[1]
+
+
+# --- _distance_from_span ----------------------------------------------------
+
+
+def test_distance_from_span_zero_when_inside():
+    assert _distance_from_span(5.0, 3.0, 8.0) == 0.0
+
+
+def test_distance_from_span_before_start():
+    assert _distance_from_span(1.0, 3.0, 8.0) == 2.0
+
+
+def test_distance_from_span_after_end():
+    assert _distance_from_span(10.0, 3.0, 8.0) == 2.0
+
+
 # --- segment validation -----------------------------------------------------
 
 
@@ -282,6 +333,84 @@ def test_validate_segment_drops_when_payoff_extension_exceeds_max_duration():
         why="setup at 0.0, payoff at 60.0 with 'he's very affordable'",
     )
     assert validate_segment(raw, words) is None
+
+
+# --- punchline_at validated against the payoff phrase's own real span -----
+# Real bug found from real output: `end` already covered the quoted payoff
+# phrase, but punchline_at itself sat 5.3s before the phrase's real start —
+# invisible to the end-coverage check above, since that only confirms the
+# SEGMENT boundary, not this specific timestamp. Feeds real downstream
+# mistakes: pre_punchline VO timing anchors 1.2s before punchline_at, and
+# clipper.thumbnail's fallback frame search centers on it.
+
+
+def test_validate_segment_corrects_drifted_punchline_at_to_phrase_start():
+    lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(30)]
+    payoff_words = [
+        {"word": "he's", "start": 35.0, "end": 35.3},
+        {"word": "very", "start": 35.3, "end": 35.5},
+        {"word": "affordable.", "start": 35.5, "end": 35.8},
+    ]
+    words = lead + payoff_words
+    raw = _raw(
+        start=0.0,
+        end=35.8,
+        punchline_at=25.0,  # 10s before the phrase's real start (35.0) — past tolerance
+        why="setup at 0.0, payoff at 25.0 with 'he's very affordable'",
+    )
+    seg = validate_segment(raw, words)
+    assert seg is not None
+    assert seg["punchline_at"] == 35.0  # corrected to the phrase's own start
+
+
+def test_validate_segment_leaves_punchline_at_within_tolerance_unchanged():
+    lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(30)]
+    payoff_words = [
+        {"word": "he's", "start": 35.0, "end": 35.3},
+        {"word": "very", "start": 35.3, "end": 35.5},
+        {"word": "affordable.", "start": 35.5, "end": 35.8},
+    ]
+    words = lead + payoff_words
+    raw = _raw(
+        start=0.0,
+        end=35.8,
+        punchline_at=34.0,  # 1.0s before the phrase start — within PUNCHLINE_DRIFT_TOLERANCE
+        why="setup at 0.0, payoff at 34.0 with 'he's very affordable'",
+    )
+    assert PUNCHLINE_DRIFT_TOLERANCE >= 1.0
+    seg = validate_segment(raw, words)
+    assert seg is not None
+    assert seg["punchline_at"] == 34.0  # left as-is, not snapped to 35.0
+
+
+def test_validate_segment_leaves_punchline_at_inside_phrase_span_unchanged():
+    lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(30)]
+    payoff_words = [
+        {"word": "he's", "start": 35.0, "end": 35.3},
+        {"word": "very", "start": 35.3, "end": 35.5},
+        {"word": "affordable.", "start": 35.5, "end": 35.8},
+    ]
+    words = lead + payoff_words
+    raw = _raw(
+        start=0.0,
+        end=35.8,
+        punchline_at=35.3,  # already inside the phrase's own span
+        why="setup at 0.0, payoff at 35.3 with 'he's very affordable'",
+    )
+    seg = validate_segment(raw, words)
+    assert seg is not None
+    assert seg["punchline_at"] == 35.3
+
+
+def test_validate_segment_skips_punchline_check_when_quote_not_found():
+    # Paraphrased why (no locatable quote) — nothing to validate punchline_at
+    # against, so it must pass through completely untouched.
+    seg = validate_segment(
+        _raw(why="setup at 10.0, payoff at 30.0 with 'a phrase not in the transcript'"),
+        _words(60),
+    )
+    assert seg is not None
+    assert seg["punchline_at"] == 35.0  # _raw()'s default, unmodified
 
 
 def test_validate_segment_skips_coverage_check_when_quote_not_found():
