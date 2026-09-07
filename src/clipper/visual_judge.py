@@ -107,10 +107,10 @@ def resolve_composition(source: str, duration: float) -> tuple[str, dict | None]
 
 
 def _extract_preview_frame(source: str, ts: float, video_fc: str, out_path: Path) -> None:
-    """One frame at ``ts``, run through ``video_fc`` (one of render.py's
-    video-only filter chains, ending in [comp]) and downscaled to preview
-    size — the REAL vertical composition this clip will ship in, not a
-    guess about it.
+    """One frame landing ON ``ts`` (not past it), run through ``video_fc``
+    (one of render.py's video-only filter chains, ending in [comp]) and
+    downscaled to preview size — the REAL vertical composition this clip
+    will ship in, not a guess about it.
 
     Requests _WARMUP_FRAMES output frames and keeps only the last, not the
     first. render()'s filter graphs mix a real seeked input with a synthetic
@@ -122,14 +122,28 @@ def _extract_preview_frame(source: str, ts: float, video_fc: str, out_path: Path
     was black, frame 5 showed the correct composited image). render() itself
     never hits this — it always encodes the full clip duration, never a
     single frame — so this warm-up is specific to still-frame extraction.
+
+    Seeks _WARMUP_FRAMES/30s BEFORE ``ts`` and decodes forward through the
+    warm-up burst, landing ON ``ts`` — not a seek-to-ts-then-keep-last, which
+    lands _WARMUP_FRAMES/30s (~0.27s) PAST it. That forward drift was a real,
+    confirmed bug: this preview frame is what best_frame_index judges, so
+    drift here means the frame the model actually saw (and later names via
+    best_frame_timestamp) isn't quite the one at the timestamp recorded —
+    compounding with clipper.thumbnail's own extraction of that same
+    timestamp. Fixed the same way render.py's pick_loop_freeze_end /
+    _extract_loop_candidate_frames already solves the identical
+    seek-then-land-exactly-here problem: seek backward by the lookahead
+    window, decode forward to the target.
     """
+    lead = _WARMUP_FRAMES / 30.0
+    seek_ts = max(0.0, ts - lead)
     with tempfile.TemporaryDirectory(prefix="clipper_warmup_") as td:
         pattern = Path(td) / "w_%02d.png"
         run_ffmpeg(
             [
                 "-y",
                 "-ss",
-                f"{ts:.3f}",
+                f"{seek_ts:.3f}",
                 "-i",
                 source,
                 "-frames:v",

@@ -91,6 +91,13 @@ LOOP_MOTION_THRESHOLD = 6.0  # mean abs pixel diff (0-255); untuned heuristic
 # needs revisiting once more real facecam layouts have been seen.
 FACECAM_PANEL_FRACTION = 0.35
 
+# split_screen/facecam_split panel geometry — named so other stage-4-adjacent
+# code (clipper.thumbnail, keeping text off the facecam panel) can reference
+# the real overlay positions instead of duplicating these as magic numbers.
+PANEL_HEIGHT = 864
+MAIN_PANEL_Y = 250
+FACECAM_PANEL_Y = 1056  # also the bottom (gameplay) panel's y in split_screen
+
 COMPOSITIONS = ("blur_fill", "tight_crop", "split_screen", "facecam_split")
 
 
@@ -214,10 +221,10 @@ def _split_screen_video() -> str:
     return (
         "color=c=black:s=1080x1920:r=30[base];"
         "[0:v]scale=1080:-2[src];"
-        "[1:v]scale=1080:864:force_original_aspect_ratio=increase,"
-        "crop=1080:864,setsar=1[game];"
-        "[base][src]overlay=0:250[t1];"
-        "[t1][game]overlay=0:1056[comp]"
+        f"[1:v]scale=1080:{PANEL_HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop=1080:{PANEL_HEIGHT},setsar=1[game];"
+        f"[base][src]overlay=0:{MAIN_PANEL_Y}[t1];"
+        f"[t1][game]overlay=0:{FACECAM_PANEL_Y}[comp]"
     )
 
 
@@ -274,13 +281,13 @@ def _facecam_split_video(face_region: dict) -> str:
     return (
         "color=c=black:s=1080x1920:r=30[base];"
         "[0:v]split=2[main_src][face_src];"
-        "[main_src]scale=1080:864:force_original_aspect_ratio=increase,"
-        f"crop=1080:864:x={main_crop_x}:y=0,setsar=1[main];"
+        f"[main_src]scale=1080:{PANEL_HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop=1080:{PANEL_HEIGHT}:x={main_crop_x}:y=0,setsar=1[main];"
         f"[face_src]crop={crop_w}:{crop_h}:{facecam_x}:{facecam_y},"
-        "scale=1080:864:force_original_aspect_ratio=increase,"
-        "crop=1080:864,setsar=1[face];"
-        "[base][main]overlay=0:250[t1];"
-        "[t1][face]overlay=0:1056[comp]"
+        f"scale=1080:{PANEL_HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop=1080:{PANEL_HEIGHT},setsar=1[face];"
+        f"[base][main]overlay=0:{MAIN_PANEL_Y}[t1];"
+        f"[t1][face]overlay=0:{FACECAM_PANEL_Y}[comp]"
     )
 
 

@@ -227,6 +227,48 @@ def test_judge_clip_uses_facecam_split_video_chain_when_detected(tmp_path, monke
     del wd  # unused beyond setup
 
 
+# --- _extract_preview_frame: seeks BEFORE ts, lands ON it, not past it -----
+# Real bug found from real output: a naive seek-to-ts-then-keep-last-of-burst
+# lands ~_WARMUP_FRAMES/30s PAST ts, not on it — confirmed by extracting both
+# and comparing against a real clip. Fixed like render.py's
+# pick_loop_freeze_end: seek backward by the lookahead window instead.
+
+
+def test_extract_preview_frame_seeks_before_ts_not_at_it(tmp_path, monkeypatch):
+    import clipper.visual_judge as vj
+
+    seen_args = []
+
+    def fake_run_ffmpeg(args):
+        seen_args.append(args)
+        # No real ffmpeg — nothing gets written to the pattern path, which is
+        # fine, this test only checks the seek argument that was requested.
+        return None
+
+    monkeypatch.setattr(vj, "run_ffmpeg", fake_run_ffmpeg)
+
+    vj._extract_preview_frame("fake.mp4", 31.35, "TC[comp]", tmp_path / "out.png")
+
+    args = seen_args[0]
+    seek_value = float(args[args.index("-ss") + 1])
+    expected = 31.35 - vj._WARMUP_FRAMES / 30.0
+    assert seek_value == pytest.approx(expected, abs=0.001)
+    assert seek_value < 31.35
+
+
+def test_extract_preview_frame_seek_never_goes_negative(tmp_path, monkeypatch):
+    import clipper.visual_judge as vj
+
+    seen_args = []
+    monkeypatch.setattr(vj, "run_ffmpeg", lambda args: seen_args.append(args))
+
+    vj._extract_preview_frame("fake.mp4", 0.05, "TC[comp]", tmp_path / "out.png")
+
+    args = seen_args[0]
+    seek_value = float(args[args.index("-ss") + 1])
+    assert seek_value == 0.0
+
+
 # --- best_frame_index -> best_frame_timestamp mapping ----------------------
 # The model's index refers to the frames it was actually shown (frame_paths'
 # order), not the original timestamps list — a failed extraction can leave

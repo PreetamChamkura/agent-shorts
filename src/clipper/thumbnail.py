@@ -50,8 +50,13 @@ was found elsewhere in this codebase to reuse (checked before building:
 narrate.py's cold_open change removed a prepended pre-roll rather than
 adding a dim filter), so this scrim is a new, small treatment built for
 this specific need. Text and scrim both stay inside a centered 1080x1080
-safe square (CLAUDE.md safe zones: Reels/TikTok grid-crop the cover image),
-vertically clear of the facecam_split panel seam at y≈960.
+safe square (CLAUDE.md safe zones: Reels/TikTok grid-crop the cover image).
+For facecam_split specifically, the text band is further restricted to the
+main panel's own visible range and NEVER overlaps the facecam panel at all
+(_text_band_center / _text_safe_bounds) — a real bug found from real output:
+an earlier version used one fixed band for every composition, which for
+facecam_split sat inside the facecam panel itself, directly over the
+visible face's mouth.
 
 Text is passed to ffmpeg via a temp textfile (drawtext's `textfile=`), not
 inlined into the filter-graph string — thumbnail_text can contain quotes,
@@ -74,7 +79,12 @@ from .face_detect import find_face_region, is_small_corner_facecam
 from .ffmpeg import run_ffmpeg, run_ffprobe
 from .frames import edge_density, read_pgm_gray
 from .paths import CAPTION_FONT, work_dir
-from .render import _facecam_panel_crop_box, _facecam_split_video, _tight_crop_video
+from .render import (
+    FACECAM_PANEL_Y,
+    _facecam_panel_crop_box,
+    _facecam_split_video,
+    _tight_crop_video,
+)
 from .styles import style_for_tone
 
 log = logging.getLogger("clipper.thumbnail")
@@ -88,11 +98,22 @@ THUMB_HEIGHT = 1920
 SAFE_SQUARE_TOP = (THUMB_HEIGHT - THUMB_WIDTH) // 2  # 420
 SAFE_SQUARE_BOTTOM = SAFE_SQUARE_TOP + THUMB_WIDTH  # 1500
 
-# Text band vertical center: inside the safe square, in its lower half (the
-# conventional thumbnail-text position) and clear of the facecam_split panel
-# seam at y≈960 (CLAUDE.md safe zones) so the band never visually collides
-# with it.
-TEXT_BAND_CENTER_Y = 1300
+# Text band vertical center for compositions with no facecam panel to avoid
+# (tight_crop, blur_fill): inside the safe square, in its lower half — the
+# conventional thumbnail-text position.
+#
+# facecam_split uses a DIFFERENT band — see TEXT_BAND_CENTER_Y_FACECAM_SPLIT
+# and _text_safe_bounds below. Real bug found from real output: an earlier
+# version used this same fixed band for every composition, which for
+# facecam_split sat inside the facecam panel itself (FACECAM_PANEL_Y=1056
+# downward), directly over the visible face's mouth. Text must never
+# overlap that panel at all for facecam_split.
+TEXT_BAND_CENTER_Y_DEFAULT = 1300
+
+# facecam_split's own band: centered within the intersection of the safe
+# square and the main panel's actually-visible range [SAFE_SQUARE_TOP,
+# FACECAM_PANEL_Y) — never touching the facecam panel. (420 + 1056) // 2.
+TEXT_BAND_CENTER_Y_FACECAM_SPLIT = (SAFE_SQUARE_TOP + FACECAM_PANEL_Y) // 2
 
 TEXT_FONTSIZE = 88
 TEXT_MARGIN_X = 60  # each side, inside the 1080-wide frame
@@ -135,6 +156,28 @@ def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text)
 
 
+def _text_band_center(composition: str) -> int:
+    """Vertical center of the thumbnail text band for ``composition`` — see
+    TEXT_BAND_CENTER_Y_FACECAM_SPLIT for why facecam_split gets its own."""
+    if composition == "facecam_split":
+        return TEXT_BAND_CENTER_Y_FACECAM_SPLIT
+    return TEXT_BAND_CENTER_Y_DEFAULT
+
+
+def _text_safe_bounds(composition: str) -> tuple[int, int]:
+    """(top, bottom): the vertical range thumbnail text is allowed to occupy
+    for ``composition``.
+
+    facecam_split gets its own, narrower range — the intersection of the
+    safe square with the main panel's own visible band, ending strictly at
+    FACECAM_PANEL_Y and never inside it. Every other composition uses the
+    full safe square.
+    """
+    if composition == "facecam_split":
+        return SAFE_SQUARE_TOP, FACECAM_PANEL_Y
+    return SAFE_SQUARE_TOP, SAFE_SQUARE_BOTTOM
+
+
 # See _extract_full_frame: render()'s multi-branch filter graphs (a real
 # seeked input plus a synthetic `color=` source feeding an overlay chain) can
 # return a solid-black first output frame before the two sync up — the exact
@@ -144,6 +187,17 @@ def _strip_emoji(text: str) -> str:
 # (render.py duplicates rather than imports select.py's word-snap logic for
 # the same reason) — kept at the same value since it fixed the real failure
 # there and this is the same underlying ffmpeg behavior.
+#
+# _extract_full_frame seeks _WARMUP_FRAMES/30s BEFORE the requested timestamp
+# and keeps the LAST frame of the burst, landing ON the timestamp — not a
+# naive seek-to-ts-then-keep-last, which lands _WARMUP_FRAMES/30s (~0.27s)
+# PAST it. That forward drift was a real bug, not theoretical: it's what
+# actually produced a visibly duller facecam-panel frame than Layer 3's own
+# chosen index, confirmed by extracting both and comparing them directly
+# against this exact clip. Mirrors render.py's pick_loop_freeze_end /
+# _extract_loop_candidate_frames, which already solves the identical
+# seek-then-land-exactly-here problem the same way (seek backward by the
+# lookahead window, decode forward to the target).
 _WARMUP_FRAMES = 8
 
 
@@ -302,17 +356,18 @@ def select_thumbnail_timestamp(
 
 
 def _extract_full_frame(source: str, ts: float, video_fc: str, out_path: Path) -> None:
-    """One full-resolution (1080x1920) frame at ``ts``, composited through
-    ``video_fc`` (render.py's real video-only filter chain) — see
-    _WARMUP_FRAMES for why this bursts and keeps only the last frame rather
-    than requesting one directly."""
+    """One full-resolution (1080x1920) frame landing ON ``ts`` (not past it —
+    see _WARMUP_FRAMES), composited through ``video_fc`` (render.py's real
+    video-only filter chain)."""
+    lead = _WARMUP_FRAMES / 30.0
+    seek_ts = max(0.0, ts - lead)
     with tempfile.TemporaryDirectory(prefix="clipper_thumbframe_") as td:
         pattern = Path(td) / "w_%02d.png"
         run_ffmpeg(
             [
                 "-y",
                 "-ss",
-                f"{ts:.3f}",
+                f"{seek_ts:.3f}",
                 "-i",
                 source,
                 "-frames:v",
@@ -420,18 +475,21 @@ def generate_thumbnail(
     line_height = TEXT_FONTSIZE * 1.25
     text_block_h = len(lines) * line_height
     box_h = round(text_block_h + 2 * SCRIM_PAD_Y)
-    box_y = round(TEXT_BAND_CENTER_Y - box_h / 2)
+    band_center_y = _text_band_center(composition)
+    box_y = round(band_center_y - box_h / 2)
     text_y = round(box_y + SCRIM_PAD_Y)
 
-    if box_y < SAFE_SQUARE_TOP or box_y + box_h > SAFE_SQUARE_BOTTOM:
+    band_top, band_bottom = _text_safe_bounds(composition)
+    if box_y < band_top or box_y + box_h > band_bottom:
         log.warning(
-            "thumbnail: n=%d text band (%d-%d) doesn't fully fit the %d-%d safe square — "
-            "%d line(s) of thumbnail_text may be long for this layout",
+            "thumbnail: n=%d text band (%d-%d) doesn't fully fit the %d-%d safe zone for "
+            "%s — %d line(s) of thumbnail_text may be long for this layout",
             n,
             box_y,
             box_y + box_h,
-            SAFE_SQUARE_TOP,
-            SAFE_SQUARE_BOTTOM,
+            band_top,
+            band_bottom,
+            composition,
             len(lines),
         )
 

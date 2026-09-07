@@ -80,6 +80,34 @@ def test_safe_square_is_centered_1080_tall():
     assert SAFE_SQUARE_TOP == 420  # (1920-1080)/2
 
 
+# --- text placement: facecam_split must never overlap the facecam panel ----
+# Real bug found from real output: a single fixed text band (y=1300) sat
+# inside the facecam panel itself, directly over the visible face's mouth.
+
+
+def test_text_band_facecam_split_stays_above_facecam_panel():
+    from clipper.render import FACECAM_PANEL_Y
+    from clipper.thumbnail import _text_band_center, _text_safe_bounds
+
+    center = _text_band_center("facecam_split")
+    top, bottom = _text_safe_bounds("facecam_split")
+    assert bottom == FACECAM_PANEL_Y
+    assert top <= center < bottom < FACECAM_PANEL_Y + 1
+
+
+def test_text_band_default_composition_unaffected():
+    from clipper.thumbnail import TEXT_BAND_CENTER_Y_DEFAULT, _text_band_center, _text_safe_bounds
+
+    assert _text_band_center("tight_crop") == TEXT_BAND_CENTER_Y_DEFAULT
+    assert _text_safe_bounds("tight_crop") == (SAFE_SQUARE_TOP, SAFE_SQUARE_BOTTOM)
+
+
+def test_text_band_facecam_split_differs_from_default():
+    from clipper.thumbnail import _text_band_center
+
+    assert _text_band_center("facecam_split") != _text_band_center("tight_crop")
+
+
 def test_strip_emoji_removes_emoji_confirmed_broken_in_drawtext():
     # Confirmed for real against a live ffmpeg + Montserrat render: emoji
     # come out as tofu boxes, not the glyph — see _EMOJI_RE's comment.
@@ -133,6 +161,38 @@ def test_select_timestamp_falls_back_when_no_visual_judge_json(tmp_path, monkeyp
 
     ts, source = select_thumbnail_timestamp("vid1", 0.0, 20.0, "tight_crop", None)
     assert (ts, source) == (7.0, "fallback")
+
+
+# --- _extract_full_frame: seeks BEFORE ts, lands ON it, not past it --------
+# Real bug found from real output: a naive seek-to-ts-then-keep-last-of-burst
+# lands ~_WARMUP_FRAMES/30s PAST ts, not on it — confirmed by extracting both
+# and comparing against a real clip (a duller facecam expression than the
+# frame Layer 3 actually named). Fixed like render.py's
+# pick_loop_freeze_end: seek backward by the lookahead window instead.
+
+
+def test_extract_full_frame_seeks_before_ts_not_at_it(tmp_path, monkeypatch):
+    seen_args = []
+    monkeypatch.setattr(thumb_mod, "run_ffmpeg", lambda args: seen_args.append(args))
+
+    thumb_mod._extract_full_frame("fake.mp4", 31.35, "TC[comp]", tmp_path / "out.png")
+
+    args = seen_args[0]
+    seek_value = float(args[args.index("-ss") + 1])
+    expected = 31.35 - thumb_mod._WARMUP_FRAMES / 30.0
+    assert seek_value == pytest.approx(expected, abs=0.001)
+    assert seek_value < 31.35
+
+
+def test_extract_full_frame_seek_never_goes_negative(tmp_path, monkeypatch):
+    seen_args = []
+    monkeypatch.setattr(thumb_mod, "run_ffmpeg", lambda args: seen_args.append(args))
+
+    thumb_mod._extract_full_frame("fake.mp4", 0.05, "TC[comp]", tmp_path / "out.png")
+
+    args = seen_args[0]
+    seek_value = float(args[args.index("-ss") + 1])
+    assert seek_value == 0.0
 
 
 # --- generate_thumbnail: composition resolution + wiring -------------------
@@ -237,6 +297,42 @@ def test_generate_thumbnail_explicit_tight_crop_skips_detection(tmp_path, monkey
     generate_thumbnail(
         "vid1", 0, 0.0, 20.0, "confident", "HE HAD NO IDEA", composition="tight_crop"
     )
+
+
+def test_generate_thumbnail_facecam_split_drawbox_never_reaches_facecam_panel(
+    tmp_path, monkeypatch
+):
+    from clipper.render import FACECAM_PANEL_Y
+
+    wd = _setup_render(tmp_path, monkeypatch)
+    region = {
+        "x": 1524.0,
+        "y": 48.8,
+        "w": 165.0,
+        "h": 165.0,
+        "frame_width": 1920,
+        "frame_height": 1080,
+    }
+    monkeypatch.setattr(thumb_mod, "find_face_region", lambda *a, **k: region)
+    monkeypatch.setattr(thumb_mod, "is_small_corner_facecam", lambda r: True)
+    monkeypatch.setattr(thumb_mod, "_facecam_split_video", lambda r: "FC[comp]")
+    monkeypatch.setattr(thumb_mod, "select_thumbnail_timestamp", lambda *a, **k: (5.0, "layer3"))
+
+    seen_args = []
+
+    def fake_run_ffmpeg(args):
+        seen_args.append(args)
+        (wd / "thumbnail_0.jpg").write_bytes(b"jpg")
+
+    monkeypatch.setattr(thumb_mod, "run_ffmpeg", fake_run_ffmpeg)
+
+    generate_thumbnail("vid1", 0, 0.0, 20.0, "confident", "HE HAD NO IDEA — SEE FOR YOURSELF")
+
+    vf = seen_args[0][seen_args[0].index("-vf") + 1]
+    drawbox = next(part for part in vf.split(",") if part.startswith("drawbox"))
+    box_y = int(drawbox.split("y=")[1].split(":")[0])
+    box_h = int(drawbox.split(":h=")[1].split(":")[0])
+    assert box_y + box_h <= FACECAM_PANEL_Y
 
 
 def test_generate_thumbnail_force_regenerates(tmp_path, monkeypatch):
