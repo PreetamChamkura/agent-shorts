@@ -19,6 +19,7 @@ from clipper.twitch import (
     fetch_trending_clips,
     get_app_access_token,
     get_broadcaster_id,
+    get_follower_count,
     get_top_live_streams,
     is_twitch_clip_url,
     token_needs_refresh,
@@ -298,7 +299,10 @@ def test_get_top_live_streams_sorts_by_viewer_count_desc(monkeypatch):
         "pagination": {},
     }
     monkeypatch.setattr(twitch_mod, "_request", lambda *a, **k: _FakeResponse(200, page))
-    streams = get_top_live_streams(token="t", client_id="c", count=10)
+    # min_followers=None: isolate the sort/pagination behavior under test from
+    # the (separately tested) follower-floor filtering, which needs its own
+    # /helix/channels/followers response shape, not this /streams page.
+    streams = get_top_live_streams(token="t", client_id="c", count=10, min_followers=None)
     assert [s["broadcaster_login"] for s in streams] == ["high", "mid", "low"]
 
 
@@ -315,9 +319,10 @@ def test_get_top_live_streams_no_filter_params(monkeypatch):
         return _FakeResponse(200, {"data": [], "pagination": {}})
 
     monkeypatch.setattr(twitch_mod, "_request", fake_request)
-    get_top_live_streams(token="t", client_id="c", count=5)
+    get_top_live_streams(token="t", client_id="c", count=5, language=None, min_followers=None)
     assert "broadcaster_id" not in seen_params
     assert "game_id" not in seen_params
+    assert "language" not in seen_params
 
 
 def test_get_top_live_streams_respects_count(monkeypatch):
@@ -325,8 +330,101 @@ def test_get_top_live_streams_respects_count(monkeypatch):
 
     page = {"data": [_stream(str(i), i) for i in range(20)], "pagination": {}}
     monkeypatch.setattr(twitch_mod, "_request", lambda *a, **k: _FakeResponse(200, page))
-    streams = get_top_live_streams(token="t", client_id="c", count=5)
+    streams = get_top_live_streams(token="t", client_id="c", count=5, min_followers=None)
     assert len(streams) == 5
+
+
+# --- get_top_live_streams: language + min_followers filters ----------------
+
+
+def test_get_top_live_streams_passes_language_param(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    seen_params = {}
+
+    def fake_request(method, url, *, headers, params=None):
+        seen_params.update(params or {})
+        return _FakeResponse(200, {"data": [], "pagination": {}})
+
+    monkeypatch.setattr(twitch_mod, "_request", fake_request)
+    get_top_live_streams(token="t", client_id="c", count=5, language="en", min_followers=None)
+    assert seen_params["language"] == "en"
+
+
+def test_get_top_live_streams_language_none_omits_param(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    seen_params = {}
+
+    def fake_request(method, url, *, headers, params=None):
+        seen_params.update(params or {})
+        return _FakeResponse(200, {"data": [], "pagination": {}})
+
+    monkeypatch.setattr(twitch_mod, "_request", fake_request)
+    get_top_live_streams(token="t", client_id="c", count=5, language=None, min_followers=None)
+    assert "language" not in seen_params
+
+
+def test_get_top_live_streams_filters_below_follower_floor(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    page = {
+        "data": [_stream("whale", 900), _stream("spiking_small", 800)],
+        "pagination": {},
+    }
+    monkeypatch.setattr(twitch_mod, "_request", lambda *a, **k: _FakeResponse(200, page))
+
+    followers = {"id_whale": 500_000, "id_spiking_small": 4_400}
+    monkeypatch.setattr(
+        twitch_mod,
+        "get_follower_count",
+        lambda broadcaster_id, **k: followers[broadcaster_id],
+    )
+
+    streams = get_top_live_streams(
+        token="t", client_id="c", count=10, language=None, min_followers=250_000
+    )
+    assert [s["broadcaster_login"] for s in streams] == ["whale"]
+
+
+def test_get_top_live_streams_annotates_follower_count(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    page = {"data": [_stream("whale", 900)], "pagination": {}}
+    monkeypatch.setattr(twitch_mod, "_request", lambda *a, **k: _FakeResponse(200, page))
+    monkeypatch.setattr(twitch_mod, "get_follower_count", lambda *a, **k: 500_000)
+
+    streams = get_top_live_streams(
+        token="t", client_id="c", count=10, language=None, min_followers=250_000
+    )
+    assert streams[0]["follower_count"] == 500_000
+
+
+def test_get_top_live_streams_no_follower_lookup_when_floor_disabled(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    page = {"data": [_stream("whale", 900)], "pagination": {}}
+    monkeypatch.setattr(twitch_mod, "_request", lambda *a, **k: _FakeResponse(200, page))
+
+    def fail_follower_count(*a, **k):
+        pytest.fail("get_follower_count should not be called when min_followers is disabled")
+
+    monkeypatch.setattr(twitch_mod, "get_follower_count", fail_follower_count)
+    streams = get_top_live_streams(
+        token="t", client_id="c", count=10, language=None, min_followers=None
+    )
+    assert len(streams) == 1
+
+
+def test_get_follower_count_reads_total_field(monkeypatch):
+    import clipper.twitch as twitch_mod
+
+    monkeypatch.setattr(
+        twitch_mod,
+        "_request",
+        lambda *a, **k: _FakeResponse(200, {"total": 11_287_614, "data": [], "pagination": {}}),
+    )
+    assert get_follower_count("id_shroud", token="t", client_id="c") == 11_287_614
 
 
 # --- fetch_trending_clips: streams -> per-channel fetch_clips, tagged ------
@@ -365,6 +463,8 @@ def test_fetch_trending_clips_tags_discovery_mode(monkeypatch):
         "mode": "trending",
         "channel": "shroud",
         "viewer_count_at_discovery": 5000,
+        "follower_count_at_discovery": None,  # _stream()/_normalize_stream() set no follower_count
+        "language": "en",  # _stream()'s fixture default
     }
 
 

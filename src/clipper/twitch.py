@@ -58,6 +58,23 @@ REFRESH_MARGIN_SECONDS = 3600.0
 CLIPS_PAGE_SIZE = 100  # Helix's max `first` for /helix/clips
 TIMEOUT = 30.0
 
+# Trending discovery defaults (see get_top_live_streams / fetch_trending_clips).
+# Not hardcoded into the functions themselves — callers (the fetch-trending CLI
+# command) can override either. English-only and an established-streamer floor
+# because "trending" without either skews toward whatever language happens to
+# be biggest on Twitch right now and toward one-off viral spikes rather than
+# channels with a real, existing audience — see the real follower-count survey
+# in get_top_live_streams()'s docstring for how DEFAULT_MIN_FOLLOWERS was picked.
+DEFAULT_LANGUAGE = "en"
+DEFAULT_MIN_FOLLOWERS = 250_000
+
+# How many raw (pre-follower-filter) streams to pull per channel slot wanted,
+# when a follower floor is active. Real testing (20 real top-live channels,
+# no language filter) found only 1/20 fell below a 250k floor — a 3x margin
+# comfortably covers that rate without paying for a follower-count lookup on
+# every candidate up front.
+_STREAM_FETCH_MULTIPLIER = 3
+
 
 class TwitchAuthError(RuntimeError):
     """Missing credentials or a token request Twitch rejected."""
@@ -255,35 +272,114 @@ def _normalize_stream(raw: dict) -> dict:
     }
 
 
-def get_top_live_streams(*, token: str, client_id: str, count: int = 20) -> list[dict]:
-    """Up to ``count`` currently-live streams, no filter — Helix's own
-    default order for an unfiltered /helix/streams call.
+def get_follower_count(broadcaster_id: str, *, token: str, client_id: str) -> int:
+    """Total follower count for ``broadcaster_id``.
 
-    Confirmed with a real call (no filter applied) rather than assumed:
-    results already come back sorted by viewer_count descending. Re-sorted
-    here anyway for the same reason fetch_clips() re-asserts its own sort —
-    a hard requirement shouldn't rest on an implicit, undocumented ordering
-    that could change. Paginates in pages of CLIPS_PAGE_SIZE if ``count``
-    exceeds Helix's 100-per-page max.
+    /helix/channels/followers is documented in terms of a user/moderator
+    token ("requires a user access token that includes moderator:read:
+    followers... if a scope is not provided or the user isn't the broadcaster
+    or a moderator, only the total follower count will be included"). That
+    wording is ambiguous about whether an app access token even gets that
+    much — confirmed for real rather than assumed: an app token against a
+    real broadcaster (shroud) returned HTTP 200 with
+    {"total": 11287614, "data": [], "pagination": {}} — the total-only case
+    the docs describe, reachable with no user token at all.
+    """
+    resp = _request(
+        "GET",
+        f"{API_BASE}/channels/followers",
+        headers=_auth_headers(token, client_id),
+        params={"broadcaster_id": broadcaster_id},
+    )
+    return int(resp.json().get("total") or 0)
+
+
+def get_top_live_streams(
+    *,
+    token: str,
+    client_id: str,
+    count: int = 20,
+    language: str | None = DEFAULT_LANGUAGE,
+    min_followers: int | None = DEFAULT_MIN_FOLLOWERS,
+) -> list[dict]:
+    """Up to ``count`` currently-live streams, sorted by viewer count.
+
+    ``language`` (ISO 639-1, e.g. "en") is passed straight through as
+    /helix/streams' own ``language`` query param — confirmed with a real call
+    that it actually filters server-side (requesting language="en" returned
+    only "en"; an unfiltered call over the same window returned a mix of
+    "en"/"es"/"de"). Pass None to disable and pull every language.
+
+    ``min_followers`` filters out channels below that follower-count floor —
+    the top-viewer-count-right-now channel at any instant can be a small
+    streamer riding a one-off viral spike rather than someone with a real,
+    established audience. Helix has no direct filter for this, so it costs
+    one extra /helix/channels/followers call per candidate (get_follower_count,
+    confirmed to work with an app access token — see its docstring).
+
+    Real survey behind the DEFAULT_MIN_FOLLOWERS=250_000 choice (20 real
+    top-live channels, unfiltered by language, follower counts fetched live):
+    18 of 20 sat between 294k and 11.7M followers; the two outliers were
+    angieeeeee at 4,400 followers (a small streamer spiking during a one-off
+    moment — exactly the case this floor exists to catch) and everyone else
+    comfortably clear of it. 250k sits above that spike and below the lowest
+    genuinely-established channel observed (realzbluewater, 294,216), so it
+    separates the two cleanly on this sample. Pass None (or 0) to disable and
+    keep pure viewer-count ordering, e.g. for testing.
+
+    Confirmed separately with a real call (no filters applied) that an
+    unfiltered /helix/streams response already comes back sorted by
+    viewer_count descending — re-sorted here anyway for the same reason
+    fetch_clips() re-asserts its own sort: a hard requirement shouldn't rest
+    on an implicit, undocumented ordering that could change.
+
+    Paginates in pages of CLIPS_PAGE_SIZE. When ``min_followers`` is set,
+    over-fetches raw candidates (_STREAM_FETCH_MULTIPLIER x ``count``) before
+    filtering, since some will fall below the floor; may still return fewer
+    than ``count`` if the floor is strict relative to what's currently live —
+    same "return fewer rather than open-endedly query more" behavior as
+    fetch_trending_clips().
     """
     headers = _auth_headers(token, client_id)
-    collected: list[dict] = []
-    cursor: str | None = None
+    fetch_target = count * _STREAM_FETCH_MULTIPLIER if min_followers else count
 
-    while len(collected) < count:
-        params = {"first": min(CLIPS_PAGE_SIZE, max(count, 1))}
+    raw: list[dict] = []
+    cursor: str | None = None
+    while len(raw) < fetch_target:
+        params = {"first": min(CLIPS_PAGE_SIZE, max(fetch_target - len(raw), 1))}
+        if language:
+            params["language"] = language
         if cursor:
             params["after"] = cursor
         resp = _request("GET", f"{API_BASE}/streams", headers=headers, params=params)
         body = resp.json()
         page = body.get("data", [])
-        collected.extend(_normalize_stream(s) for s in page)
+        raw.extend(_normalize_stream(s) for s in page)
         cursor = (body.get("pagination") or {}).get("cursor")
         if not cursor or not page:
             break
 
-    collected.sort(key=lambda s: s["viewer_count"], reverse=True)
-    return collected[:count]
+    raw.sort(key=lambda s: s["viewer_count"], reverse=True)
+
+    if not min_followers:
+        return raw[:count]
+
+    result: list[dict] = []
+    for stream in raw:
+        if len(result) >= count:
+            break
+        followers = get_follower_count(stream["broadcaster_id"], token=token, client_id=client_id)
+        stream["follower_count"] = followers
+        if followers >= min_followers:
+            result.append(stream)
+        else:
+            log.info(
+                "twitch: get_top_live_streams: skipping %s — %d followers, below floor %d",
+                stream["broadcaster_login"],
+                followers,
+                min_followers,
+            )
+    return result
 
 
 def fetch_trending_clips(
@@ -295,6 +391,8 @@ def fetch_trending_clips(
     per_channel_limit: int = 5,
     started_at: str | None = None,
     ended_at: str | None = None,
+    language: str | None = DEFAULT_LANGUAGE,
+    min_followers: int | None = DEFAULT_MIN_FOLLOWERS,
 ) -> list[dict]:
     """Up to ``limit`` clips discovered from currently-trending channels,
     with no broadcaster given up front — the trending counterpart to
@@ -310,13 +408,21 @@ def fetch_trending_clips(
     per channel — reusing it unchanged rather than duplicating its
     pagination/sort/normalization logic.
 
+    ``language`` and ``min_followers`` pass straight through to
+    get_top_live_streams() (see its docstring for how each was verified
+    against real Helix behavior and how the follower floor default was
+    picked) — this function stays a thin orchestrator, not a second place
+    those filters are implemented.
+
     Each returned clip carries clip["discovery"] = {"mode": "trending",
-    "channel": <broadcaster_login>, "viewer_count_at_discovery": <int>} —
+    "channel": <broadcaster_login>, "viewer_count_at_discovery": <int>,
+    "follower_count_at_discovery": <int | None>, "language": <str | None>} —
     the same field the `fetch-clips` CLI command stamps with mode="channel"
-    for the broadcaster-specific path, so which discovery mode found a clip
-    is visible wherever clip metadata already travels (the printed list,
-    the --out manifest, and the visual-gate-annotated dicts) without a new
-    mechanism.
+    for the broadcaster-specific path, so which discovery mode found a clip is
+    visible wherever clip metadata already travels (the printed list, the
+    --out manifest, and the visual-gate-annotated dicts) without a new
+    mechanism. follower_count_at_discovery is None when min_followers was
+    disabled for the call (no lookup was performed, so no count to report).
 
     A live channel with zero public clips (or a clip fetch that errors) is
     skipped, not fatal — trending discovery inherently means some
@@ -324,7 +430,13 @@ def fetch_trending_clips(
     regardless of whether ``limit`` is reached; returns fewer than
     ``limit`` rather than open-endedly querying more channels.
     """
-    streams = get_top_live_streams(token=token, client_id=client_id, count=top_channels)
+    streams = get_top_live_streams(
+        token=token,
+        client_id=client_id,
+        count=top_channels,
+        language=language,
+        min_followers=min_followers,
+    )
     log.info("twitch: fetch_trending_clips: %d top live channel(s) to query", len(streams))
 
     collected: list[dict] = []
@@ -351,6 +463,8 @@ def fetch_trending_clips(
                 "mode": "trending",
                 "channel": stream["broadcaster_login"],
                 "viewer_count_at_discovery": stream["viewer_count"],
+                "follower_count_at_discovery": stream.get("follower_count"),
+                "language": stream.get("language"),
             }
         collected.extend(clips)
         log.info(

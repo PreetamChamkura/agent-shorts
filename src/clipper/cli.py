@@ -51,6 +51,7 @@ another. Subcommands:
 
   clipper fetch-trending [--limit N] [--top-channels N] [--per-channel-limit N]
                          [--since T] [--until T] [--out PATH] [--no-visual-gate]
+                         [--language L] [--min-followers N]
       setup tool, not a stage. Trending counterpart to fetch-clips — no
       channel given up front. Helix's /helix/clips has no unfiltered/global
       mode (confirmed against the API reference), so this queries
@@ -59,9 +60,23 @@ another. Subcommands:
       clipper.twitch.fetch_clips() per channel — same downstream pipeline
       as fetch-clips, just a different discovery source. Each clip is
       tagged clip["discovery"] = {"mode": "trending", "channel": ...,
-      "viewer_count_at_discovery": ...}; fetch-clips tags its own clips
-      {"mode": "channel", "channel": ...} the same way, so which mode found
-      a clip stays visible in the printed list and any --out manifest.
+      "viewer_count_at_discovery": ..., "follower_count_at_discovery": ...,
+      "language": ...}; fetch-clips tags its own clips {"mode": "channel",
+      "channel": ...} the same way, so which mode found a clip stays visible
+      in the printed list and any --out manifest.
+
+      --language (default "en") filters /helix/streams server-side, so a
+      non-English candidate is never fetched only to be discarded. Pass ""
+      to pull every language. --min-followers (default 250000) filters out
+      channels below that floor — Helix has no such filter, so this costs
+      one /helix/channels/followers lookup per candidate channel (an app
+      access token gets the total-follower-count-only response, confirmed
+      for real). Pass 0 to disable and use pure current-viewer-count
+      ordering. Both exist because "trending" by live viewer count alone can
+      surface a small streamer's one-off viral spike rather than a channel
+      with a real, established audience — see clipper.twitch.
+      get_top_live_streams for the real follower-count survey behind the
+      250000 default.
 
 --start/--end/--tone are given together or not at all; a partial set is an
 error rather than a half-manual guess. Manual mode never mixes in VO (there is
@@ -174,7 +189,20 @@ def _print_clip_list(clips: list[dict]) -> int:
             n_rejected += 1
 
         discovery = c.get("discovery")
-        disc_tag = f"[{discovery['mode']}:{discovery['channel']}] " if discovery else ""
+        if discovery:
+            disc_tag = f"[{discovery['mode']}:{discovery['channel']}]"
+            extras = []
+            if discovery.get("language"):
+                extras.append(f"lang={discovery['language']}")
+            if "viewer_count_at_discovery" in discovery:
+                extras.append(f"viewers={discovery['viewer_count_at_discovery']:,}")
+            if discovery.get("follower_count_at_discovery") is not None:
+                extras.append(f"followers={discovery['follower_count_at_discovery']:,}")
+            if extras:
+                disc_tag += "[" + " ".join(extras) + "]"
+            disc_tag += " "
+        else:
+            disc_tag = ""
 
         print(
             f"{status}{disc_tag}{c['id']:<28} views={c['view_count']:>8,}  {c['created_at']}  "
@@ -297,6 +325,24 @@ def main(argv: list[str] | None = None) -> None:
         "--no-visual-gate",
         action="store_true",
         help="skip the layer-1 thumbnail pre-filter (stage 2b visual gate)",
+    )
+    fetch_trending_p.add_argument(
+        "--language",
+        default="en",
+        help=(
+            "ISO 639-1 code passed to Helix's own /helix/streams language filter "
+            "(default 'en'). Pass '' to disable and pull every language."
+        ),
+    )
+    fetch_trending_p.add_argument(
+        "--min-followers",
+        type=int,
+        default=250_000,
+        help=(
+            "minimum follower count for a channel to be considered trending "
+            "(default 250000) — filters out a small streamer's one-off viewer "
+            "spike, not just whoever is highest-viewer right now. Pass 0 to disable."
+        ),
     )
 
     args = parser.parse_args(argv)
@@ -485,6 +531,8 @@ def main(argv: list[str] | None = None) -> None:
             per_channel_limit=args.per_channel_limit,
             started_at=args.since,
             ended_at=args.until,
+            language=args.language or None,
+            min_followers=args.min_followers or None,
         )
         if not args.no_visual_gate:
             clips = screen_clips_layer1(clips)

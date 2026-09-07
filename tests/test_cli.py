@@ -251,6 +251,26 @@ def test_print_clip_list_no_discovery_tag_when_absent(capsys):
     assert "[" not in out.split("a")[0]  # nothing bracketed before the id
 
 
+def test_print_clip_list_shows_viewers_followers_language_for_trending(capsys):
+    clips = [
+        _clip(
+            "a",
+            discovery={
+                "mode": "trending",
+                "channel": "shroud",
+                "viewer_count_at_discovery": 5000,
+                "follower_count_at_discovery": 500_000,
+                "language": "en",
+            },
+        )
+    ]
+    _print_clip_list(clips)
+    out = capsys.readouterr().out
+    assert "lang=en" in out
+    assert "viewers=5,000" in out
+    assert "followers=500,000" in out
+
+
 def test_print_clip_list_counts_layer1_rejections(capsys):
     clips = [
         _clip(
@@ -311,5 +331,40 @@ def test_fetch_trending_command_calls_fetch_trending_clips(monkeypatch, capsys):
 
     assert seen["limit"] == 7
     assert seen["top_channels"] == 12
+    assert seen["language"] == "en"  # default
+    assert seen["min_followers"] == 250_000  # default
     out = capsys.readouterr().out
     assert "trending clip(s)" in out
+
+
+def test_fetch_trending_command_forwards_language_and_min_followers(monkeypatch):
+    import clipper.twitch as twitch_mod
+    from clipper.cli import main
+
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "cid")
+    monkeypatch.setattr(twitch_mod, "get_app_access_token", lambda **k: "tok")
+
+    seen = {}
+
+    def fake_fetch_trending(**k):
+        seen.update(k)
+        return []
+
+    monkeypatch.setattr(twitch_mod, "fetch_trending_clips", fake_fetch_trending)
+
+    main(
+        [
+            "fetch-trending",
+            "--language",
+            "",
+            "--min-followers",
+            "0",
+            "--no-visual-gate",
+        ]
+    )
+
+    # "" / 0 mean "disable this filter" — must reach fetch_trending_clips as
+    # None, not as a falsy string/zero that a naive `or None` might mishandle
+    # differently, and definitely not silently left at the "en"/250000 default.
+    assert seen["language"] is None
+    assert seen["min_followers"] is None
