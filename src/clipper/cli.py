@@ -31,6 +31,19 @@ another. Subcommands:
       and stops the pipeline (SystemExit) on a reject — never reaches the
       selection LLM call for a clip the vision judgment rejects.
 
+  clipper thumbnail VIDEO_ID [--n N] [--force]
+      generates work/{video_id}/thumbnail_{n}.jpg and metadata_{n}.json from
+      an already-selected segment (thumbnail_text/suggested_title/
+      suggested_hashtags — added to segments.json's schema alongside
+      caption_title/vo_script, CLAUDE.md thumbnail generation step). NOT
+      wired into `clip`/`render` by default yet — this is a standalone
+      command specifically so it can be tested against an already-approved
+      clip before it becomes automatic. Reads work/{video_id}/segments.json
+      for segment `n`'s start/end/tone/thumbnail_text; reuses Layer 3's own
+      best_frame_timestamp (clipper.visual_judge) when available and it
+      falls inside the segment's final [start, end], else picks a frame via
+      a cheap pixel-stats scan. Never touches out_{n}.mp4.
+
   clipper review VIDEO_ID [--port N]
       stage 5 only. Starts a local review server (http://127.0.0.1:PORT/)
       listing every rendered out_{n}.mp4 with its metadata, an editorial
@@ -267,6 +280,17 @@ def main(argv: list[str] | None = None) -> None:
         "--force", action="store_true", help="re-copy vo_{n}.wav (never re-pays for cached text)"
     )
 
+    thumbnail_p = sub.add_parser(
+        "thumbnail",
+        help="generate thumbnail_{n}.jpg + metadata_{n}.json for an already-selected segment "
+        "(standalone — not yet wired into clip/render by default)",
+    )
+    thumbnail_p.add_argument("video_id", help="video id of an already-selected video")
+    thumbnail_p.add_argument("--n", type=int, default=0, help="clip index within the video")
+    thumbnail_p.add_argument(
+        "--force", action="store_true", help="ignore cached thumbnail/metadata outputs"
+    )
+
     review_p = sub.add_parser("review", help="stage 5 only: local approve/reject UI")
     review_p.add_argument("video_id", help="video id with at least one rendered out_{n}.mp4")
     review_p.add_argument("--port", type=int, default=8765, help="local server port (default 8765)")
@@ -469,6 +493,23 @@ def main(argv: list[str] | None = None) -> None:
             **vo_kwargs,
         )
         print(out)
+
+    elif args.command == "thumbnail":
+        from .thumbnail import generate_thumbnail, write_metadata
+
+        seg = _segment_from_file(args.video_id, args.n)
+        thumb_path = generate_thumbnail(
+            args.video_id,
+            args.n,
+            float(seg["start"]),
+            float(seg["end"]),
+            str(seg["tone"]),
+            str(seg.get("thumbnail_text", "")),
+            force=args.force,
+        )
+        meta_path = write_metadata(args.video_id, args.n, seg, force=args.force)
+        print(thumb_path)
+        print(meta_path)
 
     elif args.command == "review":
         from .review import review

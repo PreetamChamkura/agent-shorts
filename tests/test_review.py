@@ -13,6 +13,7 @@ import pytest
 from clipper import paths
 from clipper.review import (
     CHECKLIST_KEYS,
+    _clip_assets,
     _load_review,
     _segments_with_render,
     render_review_page,
@@ -152,6 +153,60 @@ def test_render_review_page_escapes_html_in_metadata():
     page = render_review_page("vid1", segments, {})
     assert "<script>alert(1)</script>" not in page
     assert "&lt;script&gt;" in page
+
+
+# --- thumbnail + metadata block (CLAUDE.md thumbnail generation step) -------
+
+
+def test_clip_assets_reflects_missing_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    (tmp_path / "vid1").mkdir()
+    assets = _clip_assets("vid1", 0)
+    assert assets == {"has_thumbnail": False, "metadata": None}
+
+
+def test_clip_assets_reads_thumbnail_and_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    wd = tmp_path / "vid1"
+    wd.mkdir()
+    (wd / "thumbnail_0.jpg").write_bytes(b"jpg")
+    (wd / "metadata_0.json").write_text(json.dumps({"suggested_title": "T"}))
+
+    assets = _clip_assets("vid1", 0)
+    assert assets["has_thumbnail"] is True
+    assert assets["metadata"] == {"suggested_title": "T"}
+
+
+def test_render_review_page_shows_thumbnail_and_metadata():
+    segments = [{"n": 0, "caption_title": "X"}]
+    assets_by_n = {
+        0: {
+            "has_thumbnail": True,
+            "metadata": {
+                "suggested_title": "He ruled this out three weeks before it happened",
+                "thumbnail_text": '"I DIDN\'T EVEN SEE HIM"',
+                "suggested_hashtags": ["#valorant", "#clutch"],
+            },
+        }
+    }
+    page = render_review_page("vid1", segments, {}, assets_by_n)
+    assert "/media/thumbnail_0.jpg" in page
+    assert "He ruled this out three weeks before it happened" in page
+    assert "#valorant" in page
+
+
+def test_render_review_page_omits_thumbnail_block_when_nothing_generated():
+    segments = [{"n": 0, "caption_title": "X"}]
+    page = render_review_page("vid1", segments, {})
+    assert '<div class="thumbnail-block">' not in page
+
+
+def test_render_review_page_defaults_assets_when_not_passed():
+    # Existing callers (pre-thumbnail-feature call sites, and every test
+    # above this one) pass only 3 args — must not break.
+    segments = [{"n": 0, "caption_title": "X"}]
+    page = render_review_page("vid1", segments, {})
+    assert "Clip 0" in page
 
 
 # --- server integration (loopback only) ---------------------------------------

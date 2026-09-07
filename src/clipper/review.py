@@ -39,7 +39,7 @@ CHECKLIST_ITEMS = [
 ]
 CHECKLIST_KEYS = {key for key, _ in CHECKLIST_ITEMS}
 
-_MEDIA_NAME_RE = re.compile(r"^(out_\d+\.mp4|vo_\d+\.wav)$")
+_MEDIA_NAME_RE = re.compile(r"^(out_\d+\.mp4|vo_\d+\.wav|thumbnail_\d+\.jpg)$")
 
 
 def _load_review(video_id: str) -> dict:
@@ -47,6 +47,21 @@ def _load_review(video_id: str) -> dict:
     if not path.exists():
         return {"video_id": video_id, "reviews": []}
     return json.loads(path.read_text())
+
+
+def _clip_assets(video_id: str, n: int) -> dict:
+    """Filesystem lookup for one clip's generated thumbnail + metadata
+    (clipper.thumbnail) — the only I/O the caller needs to do before calling
+    the otherwise-pure render_review_page/_clip_card_html, so approval can
+    factor in whether the thumbnail actually looks good, not just the video.
+    Both are optional: a clip rendered before this feature existed, or a
+    manual (--start/--end/--tone) render that never had thumbnail_text to
+    work with, has neither.
+    """
+    wd = work_dir(video_id)
+    meta_path = wd / f"metadata_{n}.json"
+    metadata = json.loads(meta_path.read_text()) if meta_path.exists() else None
+    return {"has_thumbnail": (wd / f"thumbnail_{n}.jpg").exists(), "metadata": metadata}
 
 
 def _segments_with_render(video_id: str) -> list[dict]:
@@ -107,9 +122,40 @@ def _checklist_field_html(n: int, key: str, label: str, value: bool | None) -> s
     )
 
 
-def _clip_card_html(seg: dict, review: dict | None) -> str:
+def _thumbnail_metadata_html(n: int, assets: dict) -> str:
+    """Thumbnail image + suggested upload metadata block, or "" when neither
+    was generated (a clip rendered before this feature existed, or a manual
+    --start/--end/--tone render with no thumbnail_text to work with)."""
+    has_thumbnail = assets.get("has_thumbnail", False)
+    metadata = assets.get("metadata")
+    if not has_thumbnail and not metadata:
+        return ""
+
+    img_html = (
+        f'<img class="thumbnail" src="/media/thumbnail_{n}.jpg" alt="Generated thumbnail">'
+        if has_thumbnail
+        else "<p><em>No thumbnail generated for this clip.</em></p>"
+    )
+
+    if metadata:
+        hashtags = " ".join(html.escape(str(h)) for h in metadata.get("suggested_hashtags") or [])
+        meta_html = f"""
+        <dl class="meta">
+          <dt>Suggested title</dt><dd>{html.escape(metadata.get("suggested_title", ""))}</dd>
+          <dt>Thumbnail text</dt><dd>{html.escape(metadata.get("thumbnail_text", ""))}</dd>
+          <dt>Hashtags</dt><dd>{hashtags}</dd>
+        </dl>
+        """
+    else:
+        meta_html = "<p><em>No metadata.json generated for this clip.</em></p>"
+
+    return f'<div class="thumbnail-block">{img_html}{meta_html}</div>'
+
+
+def _clip_card_html(seg: dict, review: dict | None, assets: dict | None = None) -> str:
     n = seg["n"]
     review = review or {}
+    assets = assets or {}
     checklist = review.get("checklist") or {}
     decision = review.get("decision")
     notes = html.escape(review.get("notes") or "")
@@ -118,11 +164,13 @@ def _clip_card_html(seg: dict, review: dict | None) -> str:
         _checklist_field_html(n, key, label, checklist.get(key)) for key, label in CHECKLIST_ITEMS
     )
     status = f'<span class="status status-{decision}">{decision}</span>' if decision else ""
+    thumbnail_html = _thumbnail_metadata_html(n, assets)
 
     return f"""
     <section class="clip" id="clip-{n}" data-n="{n}">
       <h2>Clip {n} — {html.escape(seg.get("caption_title", ""))} {status}</h2>
       <video controls preload="metadata" src="/media/out_{n}.mp4"></video>
+      {thumbnail_html}
       <dl class="meta">
         <dt>Tone</dt><dd>{html.escape(seg.get("tone", ""))}</dd>
         <dt>Hook</dt><dd>{html.escape(seg.get("hook", ""))}</dd>
@@ -140,12 +188,26 @@ def _clip_card_html(seg: dict, review: dict | None) -> str:
     """
 
 
-def render_review_page(video_id: str, segments: list[dict], reviews_by_n: dict[int, dict]) -> str:
-    """Pure: build the full review page for ``video_id``. No I/O."""
+def render_review_page(
+    video_id: str,
+    segments: list[dict],
+    reviews_by_n: dict[int, dict],
+    assets_by_n: dict[int, dict] | None = None,
+) -> str:
+    """Pure: build the full review page for ``video_id``. No I/O — the caller
+    (review()'s HTTP handler) does any filesystem lookups (reviews_by_n,
+    assets_by_n) beforehand. ``assets_by_n`` is optional and defaults to
+    "nothing generated" per clip, so existing callers that only pass the
+    first three arguments keep working unchanged.
+    """
+    assets_by_n = assets_by_n or {}
     if not segments:
         body = "<p>No rendered clips found for this video yet.</p>"
     else:
-        body = "\n".join(_clip_card_html(seg, reviews_by_n.get(seg["n"])) for seg in segments)
+        body = "\n".join(
+            _clip_card_html(seg, reviews_by_n.get(seg["n"]), assets_by_n.get(seg["n"]))
+            for seg in segments
+        )
 
     return f"""<!doctype html>
 <html>
@@ -158,6 +220,11 @@ def render_review_page(video_id: str, segments: list[dict], reviews_by_n: dict[i
     color: #1a1a1a; background: #ffffff; padding: 1.5rem; border-radius: 8px; }}
   .clip {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 2rem; }}
   video {{ width: 100%; max-height: 70vh; background: #000; border-radius: 4px; }}
+  .thumbnail-block {{ display: flex; gap: 1rem; align-items: flex-start; margin: 0.75rem 0;
+    padding: 0.75rem; background: #fafafa; border: 1px solid #eee; border-radius: 6px; }}
+  .thumbnail-block img.thumbnail {{ width: 120px; height: auto; border-radius: 4px;
+    flex-shrink: 0; }}
+  .thumbnail-block .meta {{ margin: 0; }}
   .meta {{ display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem;
     margin: 0.75rem 0; }}
   .meta dt {{ font-weight: 600; color: #555; }}
@@ -218,7 +285,10 @@ class _ReviewHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/" or self.path == "":
             segments = _segments_with_render(self.video_id)
-            page = render_review_page(self.video_id, segments, _reviews_by_n(self.video_id))
+            assets_by_n = {s["n"]: _clip_assets(self.video_id, s["n"]) for s in segments}
+            page = render_review_page(
+                self.video_id, segments, _reviews_by_n(self.video_id), assets_by_n
+            )
             body = page.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -237,8 +307,14 @@ class _ReviewHandler(BaseHTTPRequestHandler):
                 self.send_error(404, "not found")
                 return
             data = path.read_bytes()
+            if name.endswith(".mp4"):
+                content_type = "video/mp4"
+            elif name.endswith(".jpg"):
+                content_type = "image/jpeg"
+            else:
+                content_type = "audio/wav"
             self.send_response(200)
-            self.send_header("Content-Type", "video/mp4" if name.endswith(".mp4") else "audio/wav")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)

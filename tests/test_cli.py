@@ -309,6 +309,51 @@ def test_write_clips_out_omits_channel_key_for_trending(tmp_path):
     assert "channel" not in data
 
 
+# --- thumbnail command dispatch: standalone, not wired into clip/render ----
+
+
+def test_thumbnail_command_calls_generate_thumbnail_and_write_metadata(monkeypatch):
+    import clipper.cli as cli_mod
+    import clipper.thumbnail as thumbnail_mod
+    from clipper.cli import main
+
+    seg = {
+        "n": 0,
+        "start": 0.0,
+        "end": 20.0,
+        "tone": "confident",
+        "thumbnail_text": "HE HAD NO IDEA",
+    }
+    monkeypatch.setattr(cli_mod, "_segment_from_file", lambda video_id, n: seg)
+
+    seen_thumb = {}
+    seen_meta = {}
+    monkeypatch.setattr(
+        thumbnail_mod,
+        "generate_thumbnail",
+        lambda video_id, n, start, end, tone, text, **k: (
+            seen_thumb.update(
+                video_id=video_id, n=n, start=start, end=end, tone=tone, text=text, **k
+            )
+            or "work/vid1/thumbnail_0.jpg"
+        ),
+    )
+    monkeypatch.setattr(
+        thumbnail_mod,
+        "write_metadata",
+        lambda video_id, n, s, **k: (
+            seen_meta.update(video_id=video_id, n=n, **k) or "work/vid1/metadata_0.json"
+        ),
+    )
+
+    main(["thumbnail", "vid1", "--n", "0", "--force"])
+
+    assert seen_thumb["video_id"] == "vid1"
+    assert seen_thumb["text"] == "HE HAD NO IDEA"
+    assert seen_thumb["force"] is True
+    assert seen_meta["force"] is True
+
+
 # --- fetch-trending command dispatch ----------------------------------------
 
 

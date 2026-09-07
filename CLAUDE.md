@@ -36,6 +36,8 @@ work/{video_id}/
   vo_{n}.words.json  3.5  narrate, whisper timing for cold_open VO captions (same condition)
   caps_{n}.ass       4    render, kept for debugging
   out_{n}.mp4        4    render
+  thumbnail_{n}.jpg  4    thumbnail (standalone `clipper thumbnail`, not yet wired into clip/render by default)
+  metadata_{n}.json  4    thumbnail (same command)
   review.json        5    approve/reject
 ```
 
@@ -68,7 +70,10 @@ Caching is load-bearing. Renders get re-run dozens of times while tuning. Re-run
     "vo_script": "He said this three weeks before the exact thing he ruled out happened.",
     "vo_placement": "cold_open",
     "why": "setup 412.8 establishing his position, turn at 431, payoff 437.1, reaction to 441.2",
-    "confidence": 0.82
+    "confidence": 0.82,
+    "thumbnail_text": "\"HE RULED IT OUT\"",
+    "suggested_title": "He publicly ruled this out three weeks before it happened",
+    "suggested_hashtags": ["#valorant", "#clutch", "#shroud"]
   }]
 }
 ```
@@ -271,6 +276,16 @@ Gameplay audio is always discarded. Gameplay video comes from `assets/gameplay/*
 - If TTS fails, render without VO and flag it in segments.json rather than failing the job.
 - Because `cold_open` no longer lengthens the render, the only way its VO still can't be used is if it's long enough to consume the clip's own duration outright. Stage 3.5 checks this once it knows the real synthesized length; if the VO doesn't leave a few seconds of the clip's own content after it, the VO is dropped for that render and the segment is flagged `vo_duration_exceeded` in segments.json — exactly like a TTS failure, never a silent bad render. The cached audio itself is untouched; only this segment's use of it as a cold open is unusable.
 
+## Thumbnail + upload metadata
+
+Static grid-thumbnail image and upload text, generated stage-4-adjacent per clip — not an automated upload. 2026 platform research finding that drives this design: YouTube Shorts' custom-thumbnail feature (July 2026) is YPP + Studio-desktop only, and the Data API's `thumbnails.set` is undocumented/unreliable for Shorts. So this produces an asset the human copies in at manual upload time, same as the video file itself — never a publishing call.
+
+- `thumbnail_text`, `suggested_title`, `suggested_hashtags` are added to the SAME `select`/`select_clip` schema and LLM call that already produces `caption_title`/`vo_script` — context is already loaded, no second call. `thumbnail_text` must read as genuinely different from `caption_title`: punchier, more outrageous, meant to compete for a click with zero context, ideally a striking quoted line of dialogue. None of the three can drop an otherwise-good segment on their own — a blank or malformed value only warns and keeps the segment, same posture as an over-long `vo_script` getting nulled rather than sinking the clip.
+- `clipper thumbnail VIDEO_ID [--n N] [--force]` (standalone CLI command, `src/clipper/thumbnail.py`) generates `thumbnail_{n}.jpg` (1080x1920) and `metadata_{n}.json` from an already-selected segment. **Not wired into `clip`/`render` by default yet** — built and tested standalone first, on purpose.
+- Frame selection prefers layer 3's own already-computed judgment (`visual_judge.json`'s `best_frame_timestamp` — the vision model that already looked at several frames to decide pass/reject also names which one is most worth using as a thumbnail, extending that same call's schema rather than paying for a second one) when it falls inside the final segment's own `[start, end]`. Falls back to a cheap pixel-stats scan (reusing `clipper.frames.edge_density`, same proxy visual_gate's layer 1 uses) when layer 3 never ran (the long-form YouTube path) or its pick got trimmed out of range by `select_clip`. For `facecam_split`, the fallback scores only the facecam panel's own source region, not the whole frame.
+- Text and its background scrim stay inside a centered 1080x1080 safe square (Reels crops the cover to 4:5/3:4, TikTok's grid does its own crop) and clear of the `facecam_split` panel seam at y≈960. Text color is the tone's own caption highlight color (`styles.yaml`) for visual consistency with the video's own captions.
+- **Emoji confirmed broken, stripped before rendering.** `drawtext` + the vendored Montserrat font renders emoji as tofu boxes, not the glyph — confirmed against a real render, not assumed. Montserrat has no emoji coverage and `drawtext` has no font-fallback mechanism (this project never relies on fontconfig substitution for exactly this kind of silent breakage). `thumbnail_text` may still carry up to 2 emoji per the prompt rules — they stay in `metadata.json` verbatim for a human assembling a thumbnail by hand elsewhere, but the auto-rendered overlay strips them first.
+
 ## Out of scope
 
 Do not build: publishing/upload code, scheduling, analytics ingestion, automated compilations, face tracking, or a hosted web app. Ask first.
@@ -285,16 +300,30 @@ instead, and in both cases: stop, tell me explicitly to run
 me to switch back to `/model claude-sonnet-5` once that specific task is done.
 
 Switch for:
-- Designing or revising the stage 3 selection prompt (prompts/select.md) —
-  segment-selection quality and the `why`-field validation logic benefit
-  more from stronger reasoning than routine coding does
+- Designing new judgment criteria in the stage 3 selection prompts
+  (prompts/select.md, prompts/select_clip.md) — open-ended questions like
+  "is this moment self-contained," "did the payoff land," the `why`-field
+  validation logic — where the model has to weigh ambiguous, competing
+  signals and stronger reasoning changes the actual quality of the
+  judgment
 - Debugging that has failed on 2+ attempts under Sonnet — a gnarly ffmpeg
   filter-graph bug, an audio-sync issue, anything where the first couple of
   fixes didn't hold
 
-Don't switch for routine work: stage scaffolding, file I/O, subprocess
-wrappers, config, tests, straightforward bug fixes. That's the majority of
-this codebase and Sonnet handles it well.
+Don't switch for: stage scaffolding, file I/O, subprocess wrappers, config,
+tests, straightforward bug fixes, OR adding a fully-specified field to an
+existing prompt — every constraint (word count, format, what to exclude)
+already decided in advance, so writing it in is transcription, not judgment
+design (e.g. `thumbnail_text`/`suggested_title`/`suggested_hashtags`: word
+counts, emoji limits, character windows, and the hashtag rule were all
+dictated before the prompt text was written — nothing about the addition
+asked the model to weigh anything the spec hadn't already settled). The
+line: did this addition ask "how should the model decide," or just "state
+this already-decided rule in the prompt"? Only the former needs Opus. If a
+fully-specified field's real output comes back generic or low-quality once
+tested, that's the trigger to revisit it on Opus with the actual bad
+examples in hand — not a reason to route every such addition through Opus
+pre-emptively.
 
 ## Known issues
 
@@ -308,3 +337,4 @@ Real, confirmed limitations left as-is on purpose — not TODOs, not forgotten. 
 - All ffmpeg calls go through one `run_ffmpeg()` helper that logs the full command and raises on non-zero with the last 40 lines of stderr. ffmpeg fails silently and weirdly — never call subprocess directly
 - No network in tests
 - Secrets in `.env`, never committed, `.env.example` current
+- `output_config`'s `json_schema` format rejects some ordinary-looking JSON Schema constraints — confirmed for real, twice, as 400s from live calls: `"minimum"` on an `integer` type, and array `"minItems"` for any value other than 0 or 1. Enforce ranges/counts in Python after parsing instead of in the schema itself when adding a new structured-output field.

@@ -221,6 +221,25 @@ def _split_screen_video() -> str:
     )
 
 
+def _facecam_panel_crop_box(face_region: dict) -> tuple[int, int, int, int]:
+    """(crop_w, crop_h, x, y): the facecam panel's source-pixel crop box —
+    the exact region _facecam_split_video() crops for its bottom panel.
+    Factored out so other stage-4-adjacent code (clipper.thumbnail, picking
+    a thumbnail frame that shows the facecam's own expression) can target
+    the same region without duplicating this math or coupling to the full
+    filter-graph string.
+    """
+    fw, fh = face_region["frame_width"], face_region["frame_height"]
+    cx = (face_region["x"] + face_region["w"] / 2) / fw
+    cy = (face_region["y"] + face_region["h"] / 2) / fh
+
+    crop_w = round(fw * FACECAM_PANEL_FRACTION)
+    crop_h = round(fh * FACECAM_PANEL_FRACTION)
+    x = 0 if cx < 0.5 else fw - crop_w
+    y = 0 if cy < 0.5 else fh - crop_h
+    return crop_w, crop_h, x, y
+
+
 def _facecam_split_video(face_region: dict) -> str:
     """Twitch-clip facecam layout (CLAUDE.md step: composition fix): the
     SAME source split into a main-content panel and a facecam panel, instead
@@ -240,17 +259,9 @@ def _facecam_split_video(face_region: dict) -> str:
     is_small_corner_facecam(face_region) must already be True — this
     function doesn't re-check that itself, render() does before calling it.
     """
-    fw, fh = face_region["frame_width"], face_region["frame_height"]
+    fw = face_region["frame_width"]
     cx = (face_region["x"] + face_region["w"] / 2) / fw
-    cy = (face_region["y"] + face_region["h"] / 2) / fh
-
-    # Facecam panel source crop: a fixed-fraction region anchored flush to
-    # whichever corner the detection landed in (see FACECAM_PANEL_FRACTION),
-    # not a tight crop of the Haar box alone.
-    crop_w = round(fw * FACECAM_PANEL_FRACTION)
-    crop_h = round(fh * FACECAM_PANEL_FRACTION)
-    facecam_x = 0 if cx < 0.5 else fw - crop_w
-    facecam_y = 0 if cy < 0.5 else fh - crop_h
+    crop_w, crop_h, facecam_x, facecam_y = _facecam_panel_crop_box(face_region)
 
     # Main-content panel: after scale-to-cover, crop from whichever
     # horizontal side is farthest from the facecam's corner, so the

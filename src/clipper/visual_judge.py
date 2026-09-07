@@ -71,8 +71,13 @@ _JUDGE_SCHEMA = {
     "properties": {
         "passed": {"type": "boolean"},
         "reason": {"type": "string"},
+        # No "minimum" constraint — confirmed for real that output_config's
+        # json_schema rejects it on an integer type ("property 'minimum' is
+        # not supported", a real 400 from a live call). Range is enforced in
+        # Python instead (judge_clip clamps out-of-range values to 0).
+        "best_frame_index": {"type": "integer"},
     },
-    "required": ["passed", "reason"],
+    "required": ["passed", "reason", "best_frame_index"],
     "additionalProperties": False,
 }
 
@@ -154,10 +159,24 @@ def _build_prompt(composition: str, n_frames: int) -> str:
         if composition == "facecam_split"
         else "a single cropped shot filling the frame (tight_crop)"
     )
+    # Steers best_frame_index toward the facecam panel specifically for
+    # facecam_split — this pick doubles as stage 4's thumbnail frame (CLAUDE.md
+    # thumbnail generation: "for a facecam_split composition, use a frame
+    # where the facecam shows visible expression/reaction, not a neutral
+    # moment"), so the instruction has to be explicit here, not left implicit
+    # in the general engagement question above.
+    facecam_best_frame_note = (
+        " For facecam_split specifically, weight this toward a frame where the facecam panel "
+        "shows a visible reaction or expression, not a neutral/blank one — that panel is what "
+        "this pick is really being used for."
+        if composition == "facecam_split"
+        else ""
+    )
     return (
         template.replace("{n_frames}", str(n_frames))
         .replace("{composition_note}", composition_note)
         .replace("{facecam_question}", facecam_question)
+        .replace("{facecam_best_frame_note}", facecam_best_frame_note)
     )
 
 
@@ -196,7 +215,14 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
     tuning a later stage) must never re-pay for the same clip's verdict
     unless force=True, same caching discipline as every other stage.
     Returns {"passed": bool, "reason": str, "composition": str,
-    "frames_sampled": int}.
+    "frames_sampled": int, "best_frame_timestamp": float}.
+    ``best_frame_timestamp`` is an absolute second into source.mp4 — the model
+    already looked at these frames to make the pass/reject call, so it also
+    names which one is most worth using as a thumbnail (CLAUDE.md thumbnail
+    generation step), reusing this judgment rather than re-sampling frames
+    and asking again. Consumed by clipper.thumbnail when it's inside the
+    final segment's own [start, end]; falls back to its own cheap heuristic
+    otherwise (e.g. select_clip trimmed the segment past this timestamp).
     """
     wd = work_dir(video_id)
     source = wd / "source.mp4"
@@ -230,11 +256,13 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
     with tempfile.TemporaryDirectory(prefix="clipper_judge_") as td:
         tmp_dir = Path(td)
         frame_paths = []
+        sampled_timestamps = []  # parallel to frame_paths — see best_frame_index mapping below
         for i, ts in enumerate(timestamps):
             out_path = tmp_dir / f"frame_{i:02d}.png"
             _extract_preview_frame(str(source), ts, video_fc, out_path)
             if out_path.exists():
                 frame_paths.append(out_path)
+                sampled_timestamps.append(ts)
 
         if not frame_paths:
             raise RuntimeError(f"visual_judge: no preview frames extracted for {video_id}")
@@ -242,11 +270,32 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
         prompt = _build_prompt(composition, len(frame_paths))
         verdict = _call_model(client, prompt, frame_paths, model)
 
+    # best_frame_index refers to the model's own numbering of the images it
+    # was actually shown (0..len(frame_paths)-1) — that's frame_paths' order,
+    # not the original `timestamps` list, since a failed extraction can leave
+    # gaps (see the loop above: only successfully-extracted frames are
+    # appended). sampled_timestamps was built in lockstep with frame_paths
+    # specifically so this index always lands on the real timestamp the model
+    # was actually looking at. Clamped defensively — a model returning an
+    # out-of-range index shouldn't crash a passing verdict, just fall back to
+    # the first sampled frame.
+    best_index = int(verdict.get("best_frame_index", 0))
+    if not (0 <= best_index < len(sampled_timestamps)):
+        log.warning(
+            "visual_judge: %s best_frame_index=%d out of range for %d sampled frame(s) — using 0",
+            video_id,
+            best_index,
+            len(sampled_timestamps),
+        )
+        best_index = 0
+    best_frame_timestamp = sampled_timestamps[best_index]
+
     result = {
         "passed": bool(verdict["passed"]),
         "reason": str(verdict["reason"]),
         "composition": composition,
         "frames_sampled": len(frame_paths),
+        "best_frame_timestamp": best_frame_timestamp,
     }
     log.info(
         "visual_judge: %s %s (%s, %d frame(s)) — %s",

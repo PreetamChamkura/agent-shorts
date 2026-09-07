@@ -47,6 +47,14 @@ Check whether the segment's ending could flow naturally back into its start if t
 
 Set `loopable` to `true` only when the loop would be genuinely seamless, not merely tolerable. Never trim or shift `start`/`end` to manufacture a loop — the boundaries are set by the rules above; loopability is an observation about the segment as already defined, not a target to hit.
 
+## Thumbnail and upload metadata
+
+Write these from the same read of the clip — they serve a different job than `caption_title` and must not just be a re-trim of it.
+
+- `thumbnail_text`: the words that go ON the static grid thumbnail image, not in the video. This has to work with zero context, competing for a click in a grid of other thumbnails — punchier and more outrageous than `caption_title`, which only has to make sense once someone's already watching. 3-6 words. Prefer a striking line of dialogue quoted verbatim from the transcript; if nothing in the transcript is quotable, write a short reaction phrase instead — never a generic hype phrase ("YOU WON'T BELIEVE THIS", "WAIT FOR IT"). 0-2 emoji max, used as an accent, not decoration. Must read as a genuinely different line from `caption_title`, not the same words trimmed differently
+- `suggested_title`: the title a human would paste in at upload time. Front-load the actual hook into the first ~50-80 characters — feeds cut titles off past that window, so anything after it should be allowed to be lost without the title losing its point
+- `suggested_hashtags`: 3-5 tags specific to this clip's actual content (the game, the person, the situation) — never generic filler like #fyp, #viral, or #shorts on their own
+
 ## Output
 
 Return only a JSON object. No prose, no markdown fences, no preamble.
@@ -64,7 +72,10 @@ Return only a JSON object. No prose, no markdown fences, no preamble.
       "vo_script": "the narrator line, or null",
       "vo_placement": "cold_open",
       "why": "setup at 2.0 establishing X, turn at 24.0, payoff at 31.2, reaction to 34.6",
-      "confidence": 0.82
+      "confidence": 0.82,
+      "thumbnail_text": "\"I DIDN'T EVEN SEE HIM\"",
+      "suggested_title": "He ruled this out three weeks before it happened",
+      "suggested_hashtags": ["#valorant", "#clutch", "#shroud"]
     }
   ]
 }
@@ -78,5 +89,8 @@ Field rules:
 - `caption_title`: max 5 words, no emoji, no clickbait phrasing. Write your own from the clip's content — never reuse or lightly edit the clip's own source title above, even if it happens to already be clean and short. That title is context for understanding the clip, not a draft; a viewer-submitted Twitch clip title is often crude, inside-joke-dependent, or simply not what this beat is actually about
 - `vo_placement`: "cold_open" or "pre_punchline"
 - `loopable`: boolean, default `false`. `true` only for a genuinely seamless repeat — most segments should stay `false`
+- `thumbnail_text`: 3-6 words, must differ genuinely from `caption_title` — see "Thumbnail and upload metadata" above
+- `suggested_title`: front-load the hook into the first ~50-80 characters
+- `suggested_hashtags`: 3-5 specific tags, never generic filler alone
 
 Return `{"segments": []}` if the clip doesn't qualify. That is a correct and expected answer for a meaningful fraction of fetched clips — not every pre-made clip survives being re-packaged with commentary.

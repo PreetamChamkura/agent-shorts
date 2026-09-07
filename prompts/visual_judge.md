@@ -10,6 +10,7 @@ Look at these frames as a sequence — what changes (or doesn't) between them ma
 
 - Is something visually engaging happening across these frames, or is this mostly static and empty? This is the exact failure mode this check exists for: content that is technically not a blank frame — there's a real hand, a real desk, real motion somewhere — but nothing a viewer would actually stop scrolling for.
 {facecam_question}- Does the framing look intentional once cropped to vertical, or does it look like an accidental, awkward crop — the subject cut off oddly, the actual action happening outside the frame, dead space sitting where the point of the clip should be?
+- Which single frame, if someone saw only that one frame as a thumbnail, would make them want to click? Pick the most visually engaging one of the {n_frames} — the peak of whatever action or expression is happening, not a neutral or in-between moment.{facecam_best_frame_note}
 
 ## Output
 
@@ -17,10 +18,12 @@ Return only a JSON object. No prose, no markdown fences, no preamble.
 
 {
   "passed": true,
-  "reason": "one concrete sentence naming what you actually saw across the frames"
+  "reason": "one concrete sentence naming what you actually saw across the frames",
+  "best_frame_index": 2
 }
 
 Field rules:
 
 - `passed`: `false` rejects the clip. Reject conservatively — a false reject here just costs one candidate clip, cheap. A false pass lets a visually dead clip through, which is the exact problem this layer exists to catch. When genuinely unsure, reject
 - `reason`: one sentence, specific to these frames — name what's actually in them (or conspicuously isn't), not a generic template. "Nothing changes across the five frames; the subject's hand rests motionless the whole time" is useful. "Doesn't look engaging" is not — that's exactly the kind of unaccountable judgment call this project avoids everywhere else
+- `best_frame_index`: 0-indexed position among the {n_frames} frames above (0 is the first/earliest). Answer this even when `passed` is `false` — it costs nothing extra and is simply ignored for a rejected clip. Pick honestly from what's actually in these frames; if every frame is equally dead, the index doesn't matter but must still be a valid one

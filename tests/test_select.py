@@ -320,6 +320,44 @@ def test_validate_segment_allows_null_vo():
     assert seg["vo_script"] is None
 
 
+# --- thumbnail + metadata fields (CLAUDE.md thumbnail generation step) -----
+
+
+def test_validate_segment_passes_through_thumbnail_fields():
+    seg = validate_segment(
+        _raw(
+            thumbnail_text="I DIDN'T EVEN SEE HIM",
+            suggested_title="He ruled this out three weeks before it happened",
+            suggested_hashtags=["#valorant", "#clutch", "#shroud"],
+        ),
+        _words(60),
+    )
+    assert seg is not None
+    assert seg["thumbnail_text"] == "I DIDN'T EVEN SEE HIM"
+    assert seg["suggested_title"] == "He ruled this out three weeks before it happened"
+    assert seg["suggested_hashtags"] == ["#valorant", "#clutch", "#shroud"]
+
+
+def test_validate_segment_keeps_segment_with_missing_thumbnail_fields():
+    # A blank marketing field must never sink an otherwise-good segment —
+    # same posture as the VO word ceiling nulling rather than dropping.
+    raw = _raw()
+    raw.pop("thumbnail_text", None)
+    raw.pop("suggested_title", None)
+    raw.pop("suggested_hashtags", None)
+    seg = validate_segment(raw, _words(60))
+    assert seg is not None
+    assert seg["thumbnail_text"] == ""
+    assert seg["suggested_title"] == ""
+    assert seg["suggested_hashtags"] == []
+
+
+def test_validate_segment_out_of_range_hashtag_count_keeps_segment(caplog):
+    seg = validate_segment(_raw(suggested_hashtags=["#one"]), _words(60))
+    assert seg is not None
+    assert seg["suggested_hashtags"] == ["#one"]
+
+
 # --- dedupe -----------------------------------------------------------------
 
 

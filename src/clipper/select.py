@@ -27,6 +27,17 @@ re-running stage 4 fifty times never re-calls the LLM.
 clips — CLAUDE.md step 2b): no windowing, one call against
 prompts/select_clip.md, boundaries already given rather than searched for —
 but the exact same validate_segment() and output schema as above.
+
+Also produces the static thumbnail + upload-metadata fields (CLAUDE.md
+thumbnail + metadata generation step) in this SAME call, not a separate LLM
+call — context is already loaded, so `thumbnail_text` (a punchier, distinct
+line for the static grid image), `suggested_title`, and `suggested_hashtags`
+ride along with caption_title/vo_script. Thin on validation by design: none
+of the three can drop an otherwise-good segment, only warn (see
+validate_segment) — a real clip shouldn't be discarded over a marketing
+field, mirroring how an over-long vo_script gets nulled rather than sinking
+the segment. Consumed by clipper.thumbnail (stage 4's thumbnail/metadata
+generation), not by render() itself.
 """
 
 from __future__ import annotations
@@ -56,6 +67,13 @@ MAX_DURATION = 58.0
 CONFIDENCE_FLOOR = 0.7
 VO_MAX_WORDS = 35  # CLAUDE.md narrator rules: 12-30 words, hard ceiling 35
 VALID_PLACEMENTS = ("cold_open", "pre_punchline")
+
+# thumbnail_text soft bounds (CLAUDE.md thumbnail spec: "3-6 words max").
+# Enforced as a warn-and-keep, not a drop — see validate_segment: a strong
+# clip shouldn't be thrown away over a marketing field the model got
+# slightly wrong on length, the same reasoning VO's word ceiling uses.
+THUMBNAIL_TEXT_MIN_WORDS = 3
+THUMBNAIL_TEXT_MAX_WORDS = 6
 
 # Placeholders in prompts/select.md. Substituted by explicit replace, never
 # str.format — the template contains a literal JSON example whose braces would
@@ -93,6 +111,19 @@ _RESPONSE_SCHEMA = {
                     "vo_placement": {"type": "string"},
                     "why": {"type": "string"},
                     "confidence": {"type": "number"},
+                    "thumbnail_text": {"type": "string"},
+                    "suggested_title": {"type": "string"},
+                    # No minItems/maxItems — confirmed for real that
+                    # output_config's json_schema rejects any array minItems
+                    # other than 0 or 1 ("'minItems' values other than 0 or 1
+                    # are not supported", a real 400 from a live call trying
+                    # [3, 5]). Count (3-5) is enforced as a soft check in
+                    # validate_segment instead, same warn-and-keep posture
+                    # as thumbnail_text's word count.
+                    "suggested_hashtags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
                 },
                 "required": [
                     "start",
@@ -106,6 +137,9 @@ _RESPONSE_SCHEMA = {
                     "vo_placement",
                     "why",
                     "confidence",
+                    "thumbnail_text",
+                    "suggested_title",
+                    "suggested_hashtags",
                 ],
                 "additionalProperties": False,
             },
@@ -411,6 +445,49 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
         )
         vo_script = None
 
+    caption_title = str(raw.get("caption_title", ""))
+
+    # Thumbnail/metadata fields (CLAUDE.md thumbnail + metadata generation
+    # step): a real segment shouldn't be dropped just because one of these
+    # marketing fields came back thin — warn and keep, same posture as the
+    # VO word-ceiling above, never a hard reject.
+    thumbnail_text = str(raw.get("thumbnail_text", "")).strip()
+    word_count = len(thumbnail_text.split())
+    if thumbnail_text and not (THUMBNAIL_TEXT_MIN_WORDS <= word_count <= THUMBNAIL_TEXT_MAX_WORDS):
+        log.warning(
+            "select: %r thumbnail_text is %d word(s) (want %d-%d): %r — keeping as-is",
+            hook,
+            word_count,
+            THUMBNAIL_TEXT_MIN_WORDS,
+            THUMBNAIL_TEXT_MAX_WORDS,
+            thumbnail_text,
+        )
+    if thumbnail_text and thumbnail_text.strip().lower() == caption_title.strip().lower():
+        log.warning(
+            "select: %r thumbnail_text is identical to caption_title (%r) — should be distinct",
+            hook,
+            thumbnail_text,
+        )
+    if not thumbnail_text:
+        log.warning("select: %r has no thumbnail_text", hook)
+
+    suggested_title = str(raw.get("suggested_title", "")).strip()
+    if not suggested_title:
+        log.warning("select: %r has no suggested_title", hook)
+
+    suggested_hashtags = [
+        str(h).strip() for h in (raw.get("suggested_hashtags") or []) if str(h).strip()
+    ]
+    if not suggested_hashtags:
+        log.warning("select: %r has no suggested_hashtags", hook)
+    elif not (3 <= len(suggested_hashtags) <= 5):
+        log.warning(
+            "select: %r has %d suggested_hashtags (want 3-5): %r — keeping as-is",
+            hook,
+            len(suggested_hashtags),
+            suggested_hashtags,
+        )
+
     return {
         "start": start,
         "end": end,
@@ -418,11 +495,14 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
         "tone": tone,
         "loopable": bool(raw.get("loopable", False)),
         "hook": hook,
-        "caption_title": str(raw.get("caption_title", "")),
+        "caption_title": caption_title,
         "vo_script": vo_script,
         "vo_placement": placement,
         "why": why,
         "confidence": round(confidence, 2),
+        "thumbnail_text": thumbnail_text,
+        "suggested_title": suggested_title,
+        "suggested_hashtags": suggested_hashtags,
     }
 
 

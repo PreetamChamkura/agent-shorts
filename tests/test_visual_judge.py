@@ -114,6 +114,13 @@ def test_build_prompt_reflects_frame_count():
     assert "3" in prompt
 
 
+def test_build_prompt_facecam_split_notes_reaction_for_best_frame():
+    prompt_fc = _build_prompt("facecam_split", 5)
+    prompt_tc = _build_prompt("tight_crop", 5)
+    assert "reaction or expression" in prompt_fc
+    assert "reaction or expression" not in prompt_tc
+
+
 # --- judge_clip: integration, network + ffmpeg mocked -----------------------
 
 
@@ -218,6 +225,89 @@ def test_judge_clip_uses_facecam_split_video_chain_when_detected(tmp_path, monke
     assert result["composition"] == "facecam_split"
     assert seen_fc == [region]
     del wd  # unused beyond setup
+
+
+# --- best_frame_index -> best_frame_timestamp mapping ----------------------
+# The model's index refers to the frames it was actually shown (frame_paths'
+# order), not the original timestamps list — a failed extraction can leave
+# gaps, so these two lists can diverge. See judge_clip()'s comment.
+
+
+def test_judge_clip_maps_best_frame_index_to_its_timestamp(tmp_path, monkeypatch):
+    import clipper.visual_judge as vj
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(vj, "_sample_timestamps", lambda duration, n: [1.0, 2.0, 3.0])
+    monkeypatch.setattr(
+        vj,
+        "_extract_preview_frame",
+        lambda source, ts, video_fc, out_path: out_path.write_bytes(b"x"),
+    )
+    monkeypatch.setattr(
+        vj,
+        "_call_model",
+        lambda client, prompt, paths_, model: {
+            "passed": True,
+            "reason": "fine",
+            "best_frame_index": 2,
+        },
+    )
+
+    result = judge_clip("vid1")
+    assert result["best_frame_timestamp"] == 3.0
+
+
+def test_judge_clip_best_frame_index_accounts_for_extraction_gaps(tmp_path, monkeypatch):
+    # Frame 1 (ts=2.0) fails to extract — frame_paths only has [1.0, 3.0]'s
+    # frames, so the model's index 1 (second image it was actually shown)
+    # must map to 3.0, not to the original list's index-1 timestamp (2.0).
+    import clipper.visual_judge as vj
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(vj, "_sample_timestamps", lambda duration, n: [1.0, 2.0, 3.0])
+
+    def fake_extract(source, ts, video_fc, out_path):
+        if ts != 2.0:
+            out_path.write_bytes(b"x")
+
+    monkeypatch.setattr(vj, "_extract_preview_frame", fake_extract)
+    monkeypatch.setattr(
+        vj,
+        "_call_model",
+        lambda client, prompt, paths_, model: {
+            "passed": True,
+            "reason": "fine",
+            "best_frame_index": 1,
+        },
+    )
+
+    result = judge_clip("vid1")
+    assert result["frames_sampled"] == 2
+    assert result["best_frame_timestamp"] == 3.0
+
+
+def test_judge_clip_out_of_range_best_frame_index_falls_back_to_zero(tmp_path, monkeypatch):
+    import clipper.visual_judge as vj
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(vj, "_sample_timestamps", lambda duration, n: [5.0, 6.0])
+    monkeypatch.setattr(
+        vj,
+        "_extract_preview_frame",
+        lambda source, ts, video_fc, out_path: out_path.write_bytes(b"x"),
+    )
+    monkeypatch.setattr(
+        vj,
+        "_call_model",
+        lambda client, prompt, paths_, model: {
+            "passed": True,
+            "reason": "fine",
+            "best_frame_index": 99,
+        },
+    )
+
+    result = judge_clip("vid1")
+    assert result["best_frame_timestamp"] == 5.0
 
 
 def test_judge_clip_default_model_is_sonnet():
