@@ -505,6 +505,9 @@ def main(argv: list[str] | None = None) -> None:
             float(seg["end"]),
             str(seg["tone"]),
             str(seg.get("thumbnail_text", "")),
+            punchline_at=float(seg["punchline_at"])
+            if seg.get("punchline_at") is not None
+            else None,
             force=args.force,
         )
         meta_path = write_metadata(args.video_id, args.n, seg, force=args.force)

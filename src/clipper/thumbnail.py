@@ -33,6 +33,26 @@ frame — the point is catching a visible reaction, and the main-content
 panel's own motion would otherwise dominate the score for a reason that has
 nothing to do with the facecam.
 
+For every other composition (tight_crop in practice), the fallback requires
+a CONFIRMED-recurring face — find_face_region()'s own temporal clustering
+over the search window, not a bare single-frame Haar check — before a
+candidate is even scored, searched in a window centered on punchline_at
+rather than spread across the whole segment. Two real bugs found from real
+output, in sequence: first, an unconditional highest-edge_density pick
+chose a visually busy but completely person-free B-roll shot (a product
+shelf) near the payoff, since thumbnail_text is usually a quoted line of
+dialogue that needs a visible speaker to read as anything; then a bare
+single-frame Haar "does this exact frame contain a face" check, added to
+fix that, itself let the SAME B-roll frame through — Haar threw 4
+false-positive hits on bottle labels/caps in that one frame, and because it
+was also the busiest-looking frame, edge_density picked it right back.
+Requiring the hit to match an ALREADY-confirmed recurring position (see
+_pick_engaging_frame_tight_crop / _frame_matches_confirmed_face) is what
+actually fixes it: a one-off texture misfire doesn't recur at the same
+spot across temporally-spread samples the way a real, present subject does.
+This does not touch facecam_split's own logic at all — that panel is, by
+construction, already where a face would be.
+
 ## Composition + text treatment
 
 Resolves composition (tight_crop vs facecam_split) independently via
@@ -75,7 +95,13 @@ import tempfile
 from pathlib import Path
 
 from .ass import DEFAULT_STYLE
-from .face_detect import find_face_region, is_small_corner_facecam
+from .face_detect import (
+    DETECT_WIDTH,
+    _load_cascade,
+    detect_faces_in_frame,
+    find_face_region,
+    is_small_corner_facecam,
+)
 from .ffmpeg import run_ffmpeg, run_ffprobe
 from .frames import edge_density, read_pgm_gray
 from .paths import CAPTION_FONT, work_dir
@@ -130,6 +156,20 @@ SCRIM_PAD_Y = 36
 # or falls outside the final segment window — see module docstring).
 _N_FALLBACK_CANDIDATES = 6
 _FRAME_SCORE_SIZE = 96
+
+# tight_crop's fallback face-gate (facecam_split is untouched by this — see
+# _pick_engaging_frame_cheap). Real bug found from real output: the
+# unconditional highest-edge_density pick chose a visually busy but
+# completely person-free B-roll shot (a product shelf) near the payoff — a
+# quoted line of dialogue on a thumbnail with no one visibly saying it
+# doesn't read as anything. Search starts centered on punchline_at (where
+# the quoted line usually IS, per CLAUDE.md's last-third payoff placement)
+# rather than spread across the whole segment, and requires a detected face
+# before a candidate is even scored. Widens once before giving up and
+# falling back to the best faceless frame in the full segment span.
+_FACE_SEARCH_INITIAL_RADIUS = 3.0
+_FACE_SEARCH_WIDENED_RADIUS = 8.0
+_FACE_SEARCH_N_CANDIDATES = 6
 
 # Confirmed for real (not assumed): ffmpeg drawtext + this vendored Montserrat
 # font renders emoji as broken tofu boxes, not the glyph — Montserrat is a
@@ -281,44 +321,186 @@ def _evenly_spaced(start: float, end: float, n: int) -> list[float]:
     return [lo + i * step for i in range(n)]
 
 
-def _pick_engaging_frame_cheap(
-    source: str,
-    start: float,
-    end: float,
-    composition: str,
-    face_region: dict | None,
-) -> float:
-    """Fallback frame pick when Layer 3's data isn't usable (see module
-    docstring): highest edge_density among a handful of candidates sampled
-    across [start, end] — the same cheap texture/detail proxy visual_gate's
-    layer 1 uses, scoped to the facecam panel's own region for facecam_split.
-    An untuned pixel-stats heuristic, not a vision judgment, same caveat as
-    layer 1 (CLAUDE.md) — the best available signal without paying for
-    another vision-model call on every long-form render.
-    """
-    crop_box = (
-        _facecam_panel_crop_box(face_region)
-        if composition == "facecam_split" and face_region
-        else None
-    )
+def _best_by_edge_density(
+    source: str, timestamps: list[float], crop_box: tuple[int, int, int, int] | None
+) -> float | None:
+    """Highest-edge_density timestamp among ``timestamps`` (optionally
+    cropped first), or None if every one failed to extract. Factored out of
+    _pick_engaging_frame_cheap so both the facecam_split path and
+    tight_crop's face-gated search share the same scoring step."""
     best_ts: float | None = None
     best_score = -1.0
-    for ts in _evenly_spaced(start, end, _N_FALLBACK_CANDIDATES):
+    for ts in timestamps:
         pixels = _extract_score_frame(source, ts, crop_box)
         if pixels is None:
             continue
         score = edge_density(pixels, _FRAME_SCORE_SIZE, _FRAME_SCORE_SIZE)
         if score > best_score:
             best_score, best_ts = score, ts
-    if best_ts is None:
+    return best_ts
+
+
+def _detect_faces_at(source: str, ts: float) -> list[tuple[int, int, int, int]]:
+    """Raw Haar hits at ``ts``, in DETECT_WIDTH's downscaled coordinate
+    space — the same detection machinery layer 2 uses (detect_faces_in_frame,
+    _load_cascade), on a single frame. No clustering — see
+    _frame_matches_confirmed_face for why a bare single-frame hit isn't
+    trusted on its own."""
+    import cv2
+
+    with tempfile.TemporaryDirectory(prefix="clipper_facecheck_") as td:
+        out = Path(td) / "f.png"
+        run_ffmpeg(
+            [
+                "-y",
+                "-ss",
+                f"{ts:.3f}",
+                "-i",
+                source,
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={DETECT_WIDTH}:-2",
+                str(out),
+            ]
+        )
+        if not out.exists():
+            return []
+        img = cv2.imread(str(out))
+        if img is None:
+            return []
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return detect_faces_in_frame(gray, _load_cascade())
+
+
+def _frame_matches_confirmed_face(source: str, ts: float, confirmed: dict) -> bool:
+    """True if a Haar hit at ``ts`` lands near ``confirmed``'s already-
+    verified position (within face_detect.CLUSTER_DISTANCE_PX, in
+    DETECT_WIDTH's coordinate space), not just any hit anywhere in the frame.
+
+    ``confirmed`` is a find_face_region() result — SOURCE pixel coordinates,
+    scaled down here to match _detect_faces_at's downscaled space. Requiring
+    a match against an ALREADY temporally-confirmed position (rather than
+    trusting a bare single-frame Haar hit on its own) is the fix for a real,
+    confirmed failure: a single-frame check alone accepted a pure product
+    B-roll shot as "has a face" — Haar threw 4 false-positive hits on bottle
+    labels/caps in that exact frame, and because it was also the busiest-
+    looking frame, edge_density then picked it anyway. A one-off false
+    positive on a specific frame's texture won't recur at the SAME position
+    across the temporally-spread samples find_face_region already checked,
+    the same reasoning that makes find_face_region itself trustworthy for
+    the facecam case (face_detect.py's own module docstring: a single frame
+    threw 3 hits, only one real; sampling and requiring recurrence fixed it).
+    """
+    from .face_detect import CLUSTER_DISTANCE_PX
+
+    scale = DETECT_WIDTH / confirmed["frame_width"]
+    confirmed_cx = (confirmed["x"] + confirmed["w"] / 2) * scale
+    confirmed_cy = (confirmed["y"] + confirmed["h"] / 2) * scale
+
+    for x, y, w, h in _detect_faces_at(source, ts):
+        cx, cy = x + w / 2, y + h / 2
+        if ((cx - confirmed_cx) ** 2 + (cy - confirmed_cy) ** 2) ** 0.5 <= CLUSTER_DISTANCE_PX:
+            return True
+    return False
+
+
+def _pick_engaging_frame_tight_crop(
+    source: str, start: float, end: float, punchline_at: float | None
+) -> float:
+    """tight_crop's fallback pick: highest edge_density among candidates
+    that actually show a CONFIRMED-recurring face, searched in a window
+    centered on ``punchline_at`` (the quoted thumbnail_text usually IS the
+    payoff line, and CLAUDE.md places the payoff in the last third of the
+    segment, so a frame far from it is likely unrelated setup footage) —
+    widened once before giving up and falling back to the best faceless
+    frame across the whole segment.
+
+    "Confirmed-recurring" means find_face_region() over the search window
+    itself first — its own temporal clustering, not a bare single-frame
+    Haar check (see _frame_matches_confirmed_face for the real failure that
+    required this). A window where nothing recurs (find_face_region returns
+    None) is treated exactly like a window with no face candidates at all.
+    """
+    anchor = punchline_at if punchline_at is not None else (start + end) / 2
+    for radius in (_FACE_SEARCH_INITIAL_RADIUS, _FACE_SEARCH_WIDENED_RADIUS):
+        window_start = max(start, anchor - radius)
+        window_end = min(end, anchor + radius)
+        if window_end <= window_start:
+            continue
+
+        confirmed = find_face_region(source, window_start, window_end)
+        if confirmed is None:
+            continue
+
+        candidates = _evenly_spaced(window_start, window_end, _FACE_SEARCH_N_CANDIDATES)
+        face_candidates = [
+            ts for ts in candidates if _frame_matches_confirmed_face(source, ts, confirmed)
+        ]
+        if face_candidates:
+            best_ts = _best_by_edge_density(source, face_candidates, None)
+            if best_ts is not None:
+                log.info(
+                    "thumbnail: confirmed a recurring face within %.1fs of punchline_at "
+                    "(%.2fs) — using %.2fs",
+                    radius,
+                    anchor,
+                    best_ts,
+                )
+                return best_ts
+
+    log.warning(
+        "thumbnail: no confirmed-recurring face found within %.1fs of punchline_at (%.2fs) in "
+        "[%.2f, %.2f] even after widening — falling back to the best faceless frame in the "
+        "full segment span",
+        _FACE_SEARCH_WIDENED_RADIUS,
+        anchor,
+        start,
+        end,
+    )
+    fallback = _best_by_edge_density(
+        source, _evenly_spaced(start, end, _N_FALLBACK_CANDIDATES), None
+    )
+    return fallback if fallback is not None else (start + end) / 2
+
+
+def _pick_engaging_frame_cheap(
+    source: str,
+    start: float,
+    end: float,
+    composition: str,
+    face_region: dict | None,
+    punchline_at: float | None = None,
+) -> float:
+    """Fallback frame pick when Layer 3's data isn't usable (see module
+    docstring): an untuned pixel-stats heuristic, not a vision judgment,
+    same caveat as visual_gate's layer 1 (CLAUDE.md) — the best available
+    signal without paying for another vision-model call on every long-form
+    render.
+
+    facecam_split scores ONLY the facecam panel's own source region
+    (unchanged by the tight_crop fix below — that panel is, by construction,
+    where a face would be, and Layer 3 already covers this composition's
+    normal case, so this rarely even runs for it). Every other composition
+    goes through _pick_engaging_frame_tight_crop's face-gated,
+    punchline-centered search instead of a plain full-segment scan.
+    """
+    if composition == "facecam_split":
+        crop_box = _facecam_panel_crop_box(face_region) if face_region else None
+        best_ts = _best_by_edge_density(
+            source, _evenly_spaced(start, end, _N_FALLBACK_CANDIDATES), crop_box
+        )
+        if best_ts is not None:
+            return best_ts
         log.warning(
             "thumbnail: every fallback candidate frame failed to extract for %.2f-%.2fs — "
             "using the segment midpoint",
             start,
             end,
         )
-        best_ts = (start + end) / 2
-    return best_ts
+        return (start + end) / 2
+
+    return _pick_engaging_frame_tight_crop(source, start, end, punchline_at)
 
 
 def select_thumbnail_timestamp(
@@ -327,11 +509,14 @@ def select_thumbnail_timestamp(
     end: float,
     composition: str,
     face_region: dict | None,
+    punchline_at: float | None = None,
 ) -> tuple[float, str]:
     """Absolute source.mp4 timestamp for this clip's thumbnail, and a short
     tag naming how it was picked ("layer3" or "fallback" — for logging and
     tests, not shown to any end user). See module docstring for the
-    preference order.
+    preference order. ``punchline_at`` centers tight_crop's fallback search
+    (see _pick_engaging_frame_tight_crop) — unused on the layer3 path and by
+    facecam_split's fallback.
     """
     wd = work_dir(video_id)
     judge_path = wd / "visual_judge.json"
@@ -351,7 +536,7 @@ def select_thumbnail_timestamp(
             )
 
     source = str(wd / "source.mp4")
-    ts = _pick_engaging_frame_cheap(source, start, end, composition, face_region)
+    ts = _pick_engaging_frame_cheap(source, start, end, composition, face_region, punchline_at)
     return ts, "fallback"
 
 
@@ -413,6 +598,7 @@ def generate_thumbnail(
     tone: str,
     thumbnail_text: str,
     *,
+    punchline_at: float | None = None,
     composition: str | None = None,
     force: bool = False,
 ) -> str:
@@ -422,8 +608,13 @@ def generate_thumbnail(
 
     ``composition`` mirrors render()'s own parameter: leave unset to
     auto-detect (tight_crop vs facecam_split) via the same clipper.face_detect
-    logic render() uses. Cached like every other stage output — skipped when
-    thumbnail_{n}.jpg already exists, unless ``force``.
+    logic render() uses. ``punchline_at`` centers tight_crop's fallback
+    frame search when Layer 3 data isn't available or usable (see
+    select_thumbnail_timestamp / _pick_engaging_frame_tight_crop) — pass
+    segments.json's own punchline_at; harmless to omit, it just widens the
+    fallback search to the segment midpoint instead. Cached like every
+    other stage output — skipped when thumbnail_{n}.jpg already exists,
+    unless ``force``.
     """
     wd = work_dir(video_id)
     source = wd / "source.mp4"
@@ -449,7 +640,9 @@ def generate_thumbnail(
                 "composition unset to auto-detect."
             )
 
-    ts, pick_source = select_thumbnail_timestamp(video_id, start, end, composition, face_region)
+    ts, pick_source = select_thumbnail_timestamp(
+        video_id, start, end, composition, face_region, punchline_at
+    )
     log.info(
         "thumbnail: n=%d composition=%s frame=%.2fs (source=%s)", n, composition, ts, pick_source
     )

@@ -163,6 +163,210 @@ def test_select_timestamp_falls_back_when_no_visual_judge_json(tmp_path, monkeyp
     assert (ts, source) == (7.0, "fallback")
 
 
+def test_select_timestamp_forwards_punchline_at_to_fallback(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)  # no visual_judge.json — forces the fallback path
+    seen = []
+    monkeypatch.setattr(
+        thumb_mod, "_pick_engaging_frame_cheap", lambda *a, **k: seen.append(a) or 9.0
+    )
+
+    select_thumbnail_timestamp("vid1", 0.0, 20.0, "tight_crop", None, 15.0)
+    assert seen[0][-1] == 15.0  # punchline_at forwarded positionally
+
+
+# --- tight_crop's fallback face-gate: two real bugs found from real output -
+# (1) an unconditional highest-edge_density pick chose a visually busy but
+# completely person-free B-roll shot near the payoff. (2) fixing that with a
+# bare single-frame Haar check let the SAME shot through anyway — Haar threw
+# 4 false-positive hits on bottle labels/caps in that exact frame. The real
+# fix requires a hit to match an ALREADY temporally-confirmed position
+# (find_face_region's own clustering over the search window), not just any
+# single-frame hit. facecam_split is untouched by any of this (see
+# test_pick_engaging_frame_cheap_facecam_split_unaffected_by_face_gate).
+
+
+def test_best_by_edge_density_picks_highest_score(monkeypatch):
+    scores = {1.0: 5.0, 2.0: 9.0, 3.0: 7.0}
+    monkeypatch.setattr(
+        thumb_mod, "_extract_score_frame", lambda source, ts, crop_box: bytes([int(scores[ts])])
+    )
+    monkeypatch.setattr(thumb_mod, "edge_density", lambda pixels, w, h: pixels[0])
+
+    result = thumb_mod._best_by_edge_density("src.mp4", [1.0, 2.0, 3.0], None)
+    assert result == 2.0
+
+
+def test_best_by_edge_density_none_when_every_extraction_fails(monkeypatch):
+    monkeypatch.setattr(thumb_mod, "_extract_score_frame", lambda source, ts, crop_box: None)
+    assert thumb_mod._best_by_edge_density("src.mp4", [1.0, 2.0], None) is None
+
+
+_CONFIRMED = {
+    "x": 100.0,
+    "y": 100.0,
+    "w": 200.0,
+    "h": 200.0,
+    "frame_width": 1920,
+    "frame_height": 1080,
+}
+
+
+def test_frame_matches_confirmed_face_true_when_hit_lands_near_it(monkeypatch):
+    from clipper.face_detect import DETECT_WIDTH
+
+    scale = DETECT_WIDTH / _CONFIRMED["frame_width"]
+    cx = (_CONFIRMED["x"] + _CONFIRMED["w"] / 2) * scale
+    cy = (_CONFIRMED["y"] + _CONFIRMED["h"] / 2) * scale
+    # A hit a few pixels off the confirmed center — well within CLUSTER_DISTANCE_PX.
+    monkeypatch.setattr(
+        thumb_mod, "_detect_faces_at", lambda source, ts: [(int(cx) - 5, int(cy) - 5, 40, 40)]
+    )
+    assert thumb_mod._frame_matches_confirmed_face("src.mp4", 5.0, _CONFIRMED) is True
+
+
+def test_frame_matches_confirmed_face_false_for_an_unrelated_hit(monkeypatch):
+    # Real scenario: a false-positive hit on bottle-label texture, nowhere
+    # near where the confirmed face actually is.
+    monkeypatch.setattr(thumb_mod, "_detect_faces_at", lambda source, ts: [(500, 500, 40, 40)])
+    assert thumb_mod._frame_matches_confirmed_face("src.mp4", 5.0, _CONFIRMED) is False
+
+
+def test_frame_matches_confirmed_face_false_when_no_hits_at_all(monkeypatch):
+    monkeypatch.setattr(thumb_mod, "_detect_faces_at", lambda source, ts: [])
+    assert thumb_mod._frame_matches_confirmed_face("src.mp4", 5.0, _CONFIRMED) is False
+
+
+def test_pick_engaging_frame_tight_crop_requires_a_confirmed_match(monkeypatch):
+    # find_face_region confirms SOMETHING recurs in the window; only one of
+    # three candidates actually matches that confirmed position — must pick
+    # among ONLY the matching candidate(s), not the highest-scoring overall.
+    monkeypatch.setattr(thumb_mod, "find_face_region", lambda source, start, end: _CONFIRMED)
+    matches = {10.0: False, 11.0: True, 12.0: False}
+    monkeypatch.setattr(
+        thumb_mod,
+        "_frame_matches_confirmed_face",
+        lambda source, ts, confirmed: matches.get(ts, False),
+    )
+    monkeypatch.setattr(thumb_mod, "_evenly_spaced", lambda start, end, n: [10.0, 11.0, 12.0])
+    seen_scored = []
+    monkeypatch.setattr(
+        thumb_mod,
+        "_best_by_edge_density",
+        lambda source, timestamps, crop_box: seen_scored.append(timestamps) or timestamps[0],
+    )
+
+    result = thumb_mod._pick_engaging_frame_tight_crop("src.mp4", 0.0, 20.0, 11.0)
+    assert result == 11.0
+    assert seen_scored[0] == [11.0]  # only the confirmed-matching candidate was scored
+
+
+def test_pick_engaging_frame_tight_crop_treats_unconfirmed_window_as_no_face(monkeypatch):
+    # find_face_region finds nothing recurring in the narrow window (returns
+    # None) — must move on to widening, never fall through to checking
+    # individual frames without a confirmed position to check them against.
+    monkeypatch.setattr(thumb_mod, "find_face_region", lambda source, start, end: None)
+
+    def fail_match(*a, **k):
+        pytest.fail("must not check individual frames when nothing was confirmed in the window")
+
+    monkeypatch.setattr(thumb_mod, "_frame_matches_confirmed_face", fail_match)
+    monkeypatch.setattr(thumb_mod, "_evenly_spaced", lambda start, end, n: [5.0, 6.0, 7.0])
+    monkeypatch.setattr(
+        thumb_mod, "_best_by_edge_density", lambda source, timestamps, crop_box: 6.0
+    )
+
+    result = thumb_mod._pick_engaging_frame_tight_crop("src.mp4", 0.0, 30.0, 15.0)
+    assert result == 6.0  # fell all the way through to the faceless fallback
+
+
+def test_pick_engaging_frame_tight_crop_widens_search_when_nothing_confirmed_nearby(monkeypatch):
+    # Nothing confirmed in the initial (narrow) window; the widened window
+    # confirms something. Must retry with the wider radius before giving up.
+    calls = []
+
+    def fake_find_face_region(source, start, end):
+        calls.append((start, end))
+        return None if len(calls) == 1 else _CONFIRMED
+
+    monkeypatch.setattr(thumb_mod, "find_face_region", fake_find_face_region)
+    monkeypatch.setattr(thumb_mod, "_frame_matches_confirmed_face", lambda source, ts, c: True)
+    monkeypatch.setattr(thumb_mod, "_evenly_spaced", lambda start, end, n: [2.0])
+    monkeypatch.setattr(
+        thumb_mod, "_best_by_edge_density", lambda source, timestamps, crop_box: timestamps[0]
+    )
+
+    result = thumb_mod._pick_engaging_frame_tight_crop("src.mp4", 0.0, 30.0, 15.0)
+    assert result == 2.0
+    assert len(calls) == 2  # widened once
+
+
+def test_pick_engaging_frame_tight_crop_falls_back_to_faceless_when_none_confirmed(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(thumb_mod, "find_face_region", lambda source, start, end: None)
+    monkeypatch.setattr(thumb_mod, "_evenly_spaced", lambda start, end, n: [5.0, 6.0, 7.0])
+    monkeypatch.setattr(
+        thumb_mod, "_best_by_edge_density", lambda source, timestamps, crop_box: 6.0
+    )
+
+    with caplog.at_level("WARNING"):
+        result = thumb_mod._pick_engaging_frame_tight_crop("src.mp4", 0.0, 30.0, 15.0)
+
+    assert result == 6.0
+    assert any("no confirmed-recurring face found" in r.message for r in caplog.records)
+
+
+def test_pick_engaging_frame_tight_crop_defaults_anchor_to_midpoint_when_no_punchline(
+    monkeypatch,
+):
+    seen_anchors = []
+
+    def fake_find_face_region(source, start, end):
+        seen_anchors.append((start + end) / 2)
+        return None
+
+    monkeypatch.setattr(thumb_mod, "find_face_region", fake_find_face_region)
+    monkeypatch.setattr(thumb_mod, "_evenly_spaced", lambda start, end, n: [1.0])
+    monkeypatch.setattr(
+        thumb_mod, "_best_by_edge_density", lambda source, timestamps, crop_box: 1.0
+    )
+
+    thumb_mod._pick_engaging_frame_tight_crop("src.mp4", 10.0, 30.0, None)
+    assert seen_anchors[0] == 20.0  # (10+30)/2, no punchline_at given
+
+
+def test_pick_engaging_frame_cheap_dispatches_to_tight_crop_search(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        thumb_mod,
+        "_pick_engaging_frame_tight_crop",
+        lambda source, start, end, punchline_at: seen.append(punchline_at) or 42.0,
+    )
+
+    result = thumb_mod._pick_engaging_frame_cheap("src.mp4", 0.0, 20.0, "tight_crop", None, 12.0)
+    assert result == 42.0
+    assert seen == [12.0]
+
+
+def test_pick_engaging_frame_cheap_facecam_split_unaffected_by_face_gate(monkeypatch):
+    # facecam_split must go through the ORIGINAL full-segment edge_density
+    # scan, never the face-gated search — this fix must not touch it.
+    def fail_tight_crop_search(*a, **k):
+        pytest.fail("facecam_split must not use the tight_crop face-gated search")
+
+    monkeypatch.setattr(thumb_mod, "_pick_engaging_frame_tight_crop", fail_tight_crop_search)
+    monkeypatch.setattr(thumb_mod, "find_face_region", fail_tight_crop_search)
+    monkeypatch.setattr(
+        thumb_mod, "_best_by_edge_density", lambda source, timestamps, crop_box: 5.0
+    )
+
+    region = {"x": 0, "y": 0, "w": 100, "h": 100, "frame_width": 1920, "frame_height": 1080}
+    result = thumb_mod._pick_engaging_frame_cheap(
+        "src.mp4", 0.0, 20.0, "facecam_split", region, 12.0
+    )
+    assert result == 5.0
+
+
 # --- _extract_full_frame: seeks BEFORE ts, lands ON it, not past it --------
 # Real bug found from real output: a naive seek-to-ts-then-keep-last-of-burst
 # lands ~_WARMUP_FRAMES/30s PAST ts, not on it — confirmed by extracting both
