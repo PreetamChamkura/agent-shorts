@@ -24,25 +24,34 @@ another. Subcommands:
 
   clipper clip URL [...same clip args...]
       ingest -> transcribe -> (select|select-clip + narrate, if no manual
-      args) -> render. Routes to select-clip automatically when URL is a
-      Twitch clip (detected from the URL itself, not a flag) — see
-      clipper.twitch.is_twitch_clip_url. For Twitch clips only, the visual
-      gate's layer 3 (clipper.visual_judge) runs right before select-clip
-      and stops the pipeline (SystemExit) on a reject — never reaches the
-      selection LLM call for a clip the vision judgment rejects.
+      args) -> render -> thumbnail. Routes to select-clip automatically
+      when URL is a Twitch clip (detected from the URL itself, not a flag)
+      — see clipper.twitch.is_twitch_clip_url. For Twitch clips only, the
+      visual gate's layer 3 (clipper.visual_judge) runs right before
+      select-clip and stops the pipeline (SystemExit) on a reject — never
+      reaches the selection LLM call for a clip the vision judgment
+      rejects. The final thumbnail step only runs when segments.json drove
+      the render (skipped for manual --start/--end/--tone, which has no
+      thumbnail_text to work with) and never fails the run — a thumbnail
+      generation error is logged and the already-rendered out_{n}.mp4 is
+      still the command's result, same posture as narrate's "TTS fails,
+      render without VO" rule.
 
   clipper thumbnail VIDEO_ID [--n N] [--force]
       generates work/{video_id}/thumbnail_{n}.jpg and metadata_{n}.json from
       an already-selected segment (thumbnail_text/suggested_title/
       suggested_hashtags — added to segments.json's schema alongside
-      caption_title/vo_script, CLAUDE.md thumbnail generation step). NOT
-      wired into `clip`/`render` by default yet — this is a standalone
-      command specifically so it can be tested against an already-approved
-      clip before it becomes automatic. Reads work/{video_id}/segments.json
-      for segment `n`'s start/end/tone/thumbnail_text; reuses Layer 3's own
+      caption_title/vo_script, CLAUDE.md thumbnail generation step). `clip`
+      now runs this automatically as its last step; this standalone command
+      stays for regenerating a thumbnail alone — e.g. rejecting a thumbnail
+      in review but keeping the video — without re-rendering out_{n}.mp4.
+      Reads work/{video_id}/segments.json for segment `n`'s
+      start/end/tone/thumbnail_text/punchline_at; reuses Layer 3's own
       best_frame_timestamp (clipper.visual_judge) when available and it
-      falls inside the segment's final [start, end], else picks a frame via
-      a cheap pixel-stats scan. Never touches out_{n}.mp4.
+      falls inside the segment's final [start, end], else locates
+      thumbnail_text's own spoken timestamp in the transcript when it's a
+      verbatim quote, else centers on punchline_at. Never touches
+      out_{n}.mp4.
 
   clipper review VIDEO_ID [--port N]
       stage 5 only. Starts a local review server (http://127.0.0.1:PORT/)
@@ -106,6 +115,8 @@ import logging
 import os
 import sys
 
+log = logging.getLogger("clipper.cli")
+
 
 def _add_clip_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--start", type=float, help="clip start, seconds (with --end and --tone)")
@@ -168,6 +179,42 @@ def _vo_kwargs(seg: dict) -> dict:
     if seg.get("vo_script") is None or seg.get("tts_failed") or seg.get("vo_duration_exceeded"):
         return {}
     return {"punchline_at": float(seg["punchline_at"]), "vo_placement": str(seg["vo_placement"])}
+
+
+def _generate_thumbnail_safely(video_id: str, n: int, seg: dict, *, force: bool) -> None:
+    """Thumbnail + metadata as the `clip` command's last step. Never raises:
+    a failure here must not fail an otherwise-successful render, same
+    posture as narrate's "TTS fails, render without VO" rule — the
+    already-rendered out_{n}.mp4 is still the command's real result. Logged
+    clearly (not silently swallowed) so a real failure rate stays visible.
+    """
+    from .thumbnail import generate_thumbnail, write_metadata
+
+    try:
+        generate_thumbnail(
+            video_id,
+            n,
+            float(seg["start"]),
+            float(seg["end"]),
+            str(seg["tone"]),
+            str(seg.get("thumbnail_text", "")),
+            punchline_at=float(seg["punchline_at"])
+            if seg.get("punchline_at") is not None
+            else None,
+            force=force,
+        )
+        write_metadata(video_id, n, seg, force=force)
+    except Exception as exc:
+        log.warning(
+            "clipper: thumbnail generation failed for %s n=%d: %s — rendering without a "
+            "thumbnail (out_%d.mp4 is unaffected; retry with `clipper thumbnail %s --n %d`)",
+            video_id,
+            n,
+            exc,
+            n,
+            video_id,
+            n,
+        )
 
 
 def _require_twitch_client_id() -> str:
@@ -423,6 +470,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         transcribe(video_id, force=args.force)
 
+        seg = None  # stays None for manual mode — no segment, no thumbnail_text to work with
         if manual:
             start, end, tone, vo_kwargs, loopable = args.start, args.end, args.tone, {}, False
         else:
@@ -469,6 +517,13 @@ def main(argv: list[str] | None = None) -> None:
             **vo_kwargs,
         )
         print(out)
+
+        # Thumbnail is the pipeline's last step, and only runs when a real
+        # segment drove the render — manual --start/--end/--tone has no
+        # thumbnail_text to work with, same reason manual mode never mixes
+        # in VO. Never fails the run: see _generate_thumbnail_safely.
+        if seg is not None:
+            _generate_thumbnail_safely(video_id, args.n, seg, force=args.force)
 
     elif args.command == "render":
         from .render import render

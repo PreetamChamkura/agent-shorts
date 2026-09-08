@@ -114,11 +114,12 @@ def test_vo_kwargs_present_for_good_segment():
 TWITCH_CLIP_URL = "https://clips.twitch.tv/SomeClipSlug"
 
 
-def _patch_stages(monkeypatch, *, judge_verdict, seg=None):
+def _patch_stages(monkeypatch, *, judge_verdict, seg=None, thumbnail_error=None):
     import clipper.ingest as ingest_mod
     import clipper.narrate as narrate_mod
     import clipper.render as render_mod
     import clipper.select as select_mod
+    import clipper.thumbnail as thumbnail_mod
     import clipper.transcribe as transcribe_mod
     import clipper.visual_judge as visual_judge_mod
 
@@ -126,7 +127,7 @@ def _patch_stages(monkeypatch, *, judge_verdict, seg=None):
     monkeypatch.setattr(transcribe_mod, "transcribe", lambda video_id, **k: None)
     monkeypatch.setattr(visual_judge_mod, "judge_clip", lambda video_id, **k: judge_verdict)
 
-    calls = {"select": 0, "select_clip": 0, "narrate": 0, "render": 0}
+    calls = {"select": 0, "select_clip": 0, "narrate": 0, "render": 0, "thumbnail": 0}
 
     def fake_select_clip(video_id, **k):
         calls["select_clip"] += 1
@@ -142,6 +143,15 @@ def _patch_stages(monkeypatch, *, judge_verdict, seg=None):
     monkeypatch.setattr(
         render_mod, "render", lambda *a, **k: calls.__setitem__("render", 1) or "out.mp4"
     )
+
+    def fake_generate_thumbnail(*a, **k):
+        calls["thumbnail"] += 1
+        if thumbnail_error is not None:
+            raise thumbnail_error
+        return "thumbnail_0.jpg"
+
+    monkeypatch.setattr(thumbnail_mod, "generate_thumbnail", fake_generate_thumbnail)
+    monkeypatch.setattr(thumbnail_mod, "write_metadata", lambda *a, **k: "metadata_0.json")
 
     if seg is not None:
         import clipper.cli as cli_mod
@@ -177,6 +187,8 @@ def test_clip_command_proceeds_to_select_clip_on_visual_pass(monkeypatch):
         "tone": "confident",
         "vo_script": None,
         "loopable": False,
+        "thumbnail_text": "SOME QUOTE",
+        "punchline_at": 15.0,
     }
     calls = _patch_stages(
         monkeypatch,
@@ -189,6 +201,85 @@ def test_clip_command_proceeds_to_select_clip_on_visual_pass(monkeypatch):
     assert calls["select_clip"] == 1
     assert calls["narrate"] == 1
     assert calls["render"] == 1
+    assert calls["thumbnail"] == 1
+
+
+# --- clip command: thumbnail as the automatic last step --------------------
+
+
+def test_clip_command_generates_thumbnail_after_render(monkeypatch):
+    from clipper.cli import main
+
+    seg = {
+        "n": 0,
+        "start": 0.0,
+        "end": 20.0,
+        "tone": "confident",
+        "vo_script": None,
+        "loopable": False,
+        "thumbnail_text": "SOME QUOTE",
+        "punchline_at": 15.0,
+    }
+    calls = _patch_stages(
+        monkeypatch,
+        judge_verdict={"passed": True, "reason": "good", "composition": "tight_crop"},
+        seg=seg,
+    )
+
+    main(["clip", TWITCH_CLIP_URL])
+    assert calls["thumbnail"] == 1
+
+
+def test_clip_command_skips_thumbnail_for_manual_mode(monkeypatch):
+    from clipper.cli import main
+
+    calls = _patch_stages(
+        monkeypatch, judge_verdict={"passed": True, "reason": "good", "composition": "tight_crop"}
+    )
+
+    main(
+        [
+            "clip",
+            "https://www.youtube.com/watch?v=abc123",
+            "--start",
+            "0.0",
+            "--end",
+            "20.0",
+            "--tone",
+            "confident",
+        ]
+    )
+    assert calls["thumbnail"] == 0
+    assert calls["render"] == 1  # the render itself still ran and succeeded
+
+
+def test_clip_command_thumbnail_failure_does_not_fail_the_run(monkeypatch, capsys, caplog):
+    from clipper.cli import main
+
+    seg = {
+        "n": 0,
+        "start": 0.0,
+        "end": 20.0,
+        "tone": "confident",
+        "vo_script": None,
+        "loopable": False,
+        "thumbnail_text": "SOME QUOTE",
+        "punchline_at": 15.0,
+    }
+    calls = _patch_stages(
+        monkeypatch,
+        judge_verdict={"passed": True, "reason": "good", "composition": "tight_crop"},
+        seg=seg,
+        thumbnail_error=RuntimeError("no face found anywhere"),
+    )
+
+    with caplog.at_level("WARNING"):
+        main(["clip", TWITCH_CLIP_URL])  # must not raise despite the thumbnail error
+
+    assert calls["render"] == 1
+    assert calls["thumbnail"] == 1
+    assert "out.mp4" in capsys.readouterr().out  # render's result was still printed
+    assert any("thumbnail generation failed" in r.message for r in caplog.records)
 
 
 def test_clip_command_skips_visual_gate_for_non_twitch_url(monkeypatch):
