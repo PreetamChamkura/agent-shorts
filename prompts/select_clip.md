@@ -33,7 +33,7 @@ Reject without exception:
 
 Write one line of VO following the persona rules. The line frames the clip; it does not describe it.
 
-Before writing, ask: what would the viewer need to know to find this interesting that they cannot get from watching? That is the line.
+Before writing, ask two things: what would the viewer need to know to find this interesting that they cannot get from watching, AND what actually makes this moment worth watching — is it shocking, funny, awkward, impressive, dramatic, absurd? A true fact that doesn't convey which of those it is isn't finished yet. The line should frame the clip toward that specific thing, not just supply a nearby fact and stop.
 
 If there is nothing — the clip is entirely self-explanatory — set `vo_script` to null rather than writing filler. A clip with no VO is fine. A clip with an empty VO is not.
 
@@ -52,7 +52,7 @@ Set `loopable` to `true` only when the loop would be genuinely seamless, not mer
 Write these from the same read of the clip — they serve a different job than `caption_title` and must not just be a re-trim of it.
 
 - `thumbnail_text`: the words that go ON the static grid thumbnail image, not in the video. This has to work with zero context, competing for a click in a grid of other thumbnails — punchier and more outrageous than `caption_title`, which only has to make sense once someone's already watching. 3-6 words. Prefer a striking line of dialogue quoted verbatim from the transcript; if nothing in the transcript is quotable, write a short reaction phrase instead — never a generic hype phrase ("YOU WON'T BELIEVE THIS", "WAIT FOR IT"). 0-2 emoji max, used as an accent, not decoration. Must read as a genuinely different line from `caption_title`, not the same words trimmed differently. **If you put quote marks around it, it must be an exact contiguous span of words from the transcript — same spelling, same words, no substitutions ("med school" is not "medical school", "he's not" is not "he isn't"), even for a single word.** Light edits for readability are not allowed inside quote marks; a real transcript quote can be trimmed shorter but never reworded. If the line isn't an exact transcript span, don't wrap it in quote marks — write it as a plain reaction phrase instead. This isn't just style: this clip's actual downloaded frame gets picked by finding where the quoted words are spoken, so a quote that isn't real breaks that mechanism silently and the thumbnail image loses its connection to the words on it
-- `suggested_title`: the title a human would paste in at upload time. Front-load the actual hook into the first ~50-80 characters — feeds cut titles off past that window, so anything after it should be allowed to be lost without the title losing its point
+- `suggested_title`: the title a human would paste in at upload time. It creates curiosity, it does not summarize — if the title fully explains the clip, the viewer already knows what happens and has no reason to watch it. Withhold the specific payoff: reference that something happened without revealing what it was. "Sodapoppin had no idea who was in his kitchen" works; "Mia Khalifa is in Sodapoppin's kitchen" does not — that second version answers the question the title should be creating. Still has to be accurate: never imply something that doesn't happen in the clip. This is curiosity, not clickbait — no "you won't believe," no fabricated stakes, no promising a payoff the clip doesn't deliver, just withholding the one specific detail that would let someone skip watching. Front-load the hook into the first ~50-80 characters — feeds cut titles off past that window, so anything after it should be allowed to be lost without the title losing its point
 - `suggested_hashtags`: 3-5 tags specific to this clip's actual content (the game, the person, the situation) — never generic filler like #fyp, #viral, or #shorts on their own
 
 ## Output
@@ -90,7 +90,7 @@ Field rules:
 - `vo_placement`: "cold_open" or "pre_punchline"
 - `loopable`: boolean, default `false`. `true` only for a genuinely seamless repeat — most segments should stay `false`
 - `thumbnail_text`: 3-6 words, must differ genuinely from `caption_title` — see "Thumbnail and upload metadata" above. Quote marks mean an exact transcript span, word for word — never use them around a paraphrase
-- `suggested_title`: front-load the hook into the first ~50-80 characters
+- `suggested_title`: creates curiosity, withholds the specific payoff, still accurate — never a summary that answers its own question. Front-load the hook into the first ~50-80 characters
 - `suggested_hashtags`: 3-5 specific tags, never generic filler alone
 
 Return `{"segments": []}` if the clip doesn't qualify. That is a correct and expected answer for a meaningful fraction of fetched clips — not every pre-made clip survives being re-packaged with commentary.

@@ -69,7 +69,7 @@ log = logging.getLogger("clipper.render")
 MIN_DURATION = 18.0
 MAX_DURATION = 58.0
 
-WATERMARK_HANDLE = "@HANDLE"
+WATERMARK_HANDLE = "@FrameByFrameMoments"
 WATERMARK_Y = 1400  # below the caption band, still inside the y 250-1520 safe zone
 
 # Tight-crop scale-up factor: 1080 * 1.6 = 1728 wide, cropped back to 1080.

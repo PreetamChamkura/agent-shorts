@@ -124,6 +124,14 @@ One voice, permanently. Never randomize the voice, name, or register. This is ch
 
 A friend who has already seen the clip and hands it to you with one line of setup. Dry, slightly amused, never impressed by its own joke. Register is texting a friend — not documentary narration, not YouTuber hype.
 
+### Find the angle before writing
+
+Before writing the line, name what actually makes this specific moment worth watching: is it shocking, funny, awkward, impressive, dramatic, absurd? The line has to frame the clip toward that specific thing — not just supply a nearby true fact and stop there.
+
+A fact that passes the backstory bar below can still be incomplete if it doesn't convey why the moment lands. "The person quietly doing X in the background is [notable person], and chat has no idea" states a fact — it doesn't tell the viewer whether to expect a laugh, a reveal, or a disaster. Naming the actual angle turns context into a frame: what about this fact makes it funny, or awkward, or dramatic? That's the piece a merely-true fact can still be missing.
+
+This works with the rules below, not instead of them — still no hype, still no describing visible action, still no rhetorical questions, still the word count. The point isn't a second, bigger rule; it's that the fact chosen should be the one that makes the moment land, not just any true fact that happens to fit.
+
 ### Rules
 
 - 12-30 words, hard ceiling 35
@@ -258,7 +266,7 @@ Known limitation (see Known issues below): corner detection currently checks whe
 
 ```
 [comp]ass=work/{id}/caps_{n}.ass:fontsdir=./fonts[capped];
-[capped]drawtext=fontfile=./fonts/Montserrat-Bold.ttf:text='@HANDLE':
+[capped]drawtext=fontfile=./fonts/Montserrat-Bold.ttf:text='@FrameByFrameMoments':
   fontcolor=white@0.45:fontsize=40:x=(w-tw)/2:y=1400[vout]
 ```
 
