@@ -12,7 +12,12 @@ from __future__ import annotations
 
 import pytest
 
-from clipper.render import _audio_tail, _merge_vo_and_clip_captions, _pre_punchline_start_seconds
+from clipper.render import (
+    _audio_tail,
+    _merge_vo_and_clip_captions,
+    _pre_punchline_start_seconds,
+    render,
+)
 
 # --- shared silence-and-mix window (both placements) -------------------------
 
@@ -123,3 +128,19 @@ def test_merge_vo_and_clip_captions_empty_clip_words():
     vo_words = [{"word": "Hey.", "start": 0.0, "end": 0.5}]
     ass = _merge_vo_and_clip_captions(vo_words, [], vo_duration=4.5, group_size=3, style={})
     assert "HEY." in ass
+
+
+def test_render_refuses_a_caption_and_a_vo_at_once():
+    # Mutually exclusive narration modes — stage 3 nulls one of them, so a
+    # segment carrying both was hand-assembled and must fail loudly.
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        render(
+            "vid",
+            0,
+            0.0,
+            30.0,
+            "burn",
+            punchline_at=25.0,
+            vo_placement="cold_open",
+            on_screen_caption="a held line",
+        )

@@ -9,6 +9,7 @@ import pytest
 from clipper import paths
 from clipper import select as select_mod
 from clipper.select import (
+    CAPTION_ONLY,
     MIN_DURATION,
     PUNCHLINE_DRIFT_TOLERANCE,
     _distance_from_span,
@@ -23,6 +24,7 @@ from clipper.select import (
     parse_timestamps,
     render_prompt,
     render_transcript,
+    resolve_narration,
     select_clip,
     snap_to_words,
     validate_segment,
@@ -617,3 +619,87 @@ def test_min_duration_floor_matches_the_hard_range():
     # Sanity: the pre-model reject threshold is the same 18s floor everything
     # else in this module uses, not a separately-tuned number.
     assert MIN_DURATION == 18.0
+
+
+# --- narration mode (caption_only) ------------------------------------------
+
+
+def _narr(**over):
+    base = {"vo_script": None, "on_screen_caption": None}
+    base.update(over)
+    return base
+
+
+def test_resolve_narration_keeps_the_vo_for_a_spoken_placement():
+    vo, cap = resolve_narration("h", _narr(vo_script="a line"), "cold_open")
+    assert (vo, cap) == ("a line", None)
+
+
+def test_resolve_narration_keeps_the_caption_for_caption_only():
+    vo, cap = resolve_narration("h", _narr(on_screen_caption="a held line"), CAPTION_ONLY)
+    assert (vo, cap) == (None, "a held line")
+
+
+def test_resolve_narration_drops_the_vo_when_the_mode_is_caption_only():
+    # vo_placement is the authority: the model said caption_only, so the
+    # spoken line is the one that doesn't belong.
+    vo, cap = resolve_narration(
+        "h", _narr(vo_script="spoken", on_screen_caption="held"), CAPTION_ONLY
+    )
+    assert (vo, cap) == (None, "held")
+
+
+def test_resolve_narration_drops_the_caption_when_the_mode_is_spoken():
+    vo, cap = resolve_narration(
+        "h", _narr(vo_script="spoken", on_screen_caption="held"), "pre_punchline"
+    )
+    assert (vo, cap) == ("spoken", None)
+
+
+def test_resolve_narration_caption_only_with_no_caption_is_silence_not_a_drop():
+    assert resolve_narration("h", _narr(), CAPTION_ONLY) == (None, None)
+
+
+def test_resolve_narration_treats_blank_strings_as_null():
+    assert resolve_narration("h", _narr(on_screen_caption="   "), CAPTION_ONLY) == (None, None)
+    assert resolve_narration("h", _narr(vo_script="  "), "cold_open") == (None, None)
+
+
+def test_resolve_narration_applies_the_word_ceiling_to_a_held_caption_too():
+    # Same editorial bar as vo_script — nulled, never a dropped segment.
+    long_line = " ".join(["word"] * 40)
+    assert resolve_narration("h", _narr(on_screen_caption=long_line), CAPTION_ONLY) == (None, None)
+
+
+def test_validate_segment_accepts_caption_only():
+    seg = validate_segment(
+        _raw(
+            vo_script=None,
+            on_screen_caption="Her actual doctor is the one laughing hardest here.",
+            vo_placement=CAPTION_ONLY,
+            narration_mode_reason="the laugh running under the whole back half is the payoff",
+        ),
+        _words(60),
+    )
+    assert seg is not None
+    assert seg["vo_script"] is None
+    assert seg["on_screen_caption"] == "Her actual doctor is the one laughing hardest here."
+    assert seg["vo_placement"] == CAPTION_ONLY
+
+
+def test_validate_segment_still_rejects_an_unknown_placement():
+    assert validate_segment(_raw(vo_placement="whenever"), _words(60)) is None
+
+
+def test_validate_segment_keeps_the_segment_when_the_reason_is_missing():
+    # Accountability field, warn-only — never grounds to drop a real segment.
+    seg = validate_segment(_raw(narration_mode_reason=""), _words(60))
+    assert seg is not None
+    assert seg["narration_mode_reason"] == ""
+
+
+def test_validate_segment_spoken_segment_carries_a_null_caption():
+    seg = validate_segment(_raw(on_screen_caption="a stray held line"), _words(60))
+    assert seg is not None
+    assert seg["on_screen_caption"] is None
+    assert seg["vo_script"] is not None

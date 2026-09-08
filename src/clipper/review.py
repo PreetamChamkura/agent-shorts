@@ -159,7 +159,18 @@ def _clip_card_html(seg: dict, review: dict | None, assets: dict | None = None) 
     checklist = review.get("checklist") or {}
     decision = review.get("decision")
     notes = html.escape(review.get("notes") or "")
-    vo_script = html.escape(seg.get("vo_script") or "(no VO)")
+    # One narration row, not three: the three modes are exclusive, so showing
+    # empty slots for the two that didn't apply is noise on a review page whose
+    # whole job is a fast yes/no.
+    if seg.get("on_screen_caption"):
+        narration_label = "On-screen caption"
+        narration_text = html.escape(str(seg["on_screen_caption"]))
+    elif seg.get("vo_script"):
+        narration_label = f"VO script ({html.escape(str(seg.get('vo_placement', '')))})"
+        narration_text = html.escape(str(seg["vo_script"]))
+    else:
+        narration_label = "Narration"
+        narration_text = "(none)"
     checklist_html = "\n".join(
         _checklist_field_html(n, key, label, checklist.get(key)) for key, label in CHECKLIST_ITEMS
     )
@@ -175,7 +186,7 @@ def _clip_card_html(seg: dict, review: dict | None, assets: dict | None = None) 
         <dt>Tone</dt><dd>{html.escape(seg.get("tone", ""))}</dd>
         <dt>Hook</dt><dd>{html.escape(seg.get("hook", ""))}</dd>
         <dt>Loopable</dt><dd>{"yes" if seg.get("loopable") else "no"}</dd>
-        <dt>VO script</dt><dd>{vo_script}</dd>
+        <dt>{narration_label}</dt><dd>{narration_text}</dd>
       </dl>
       <div class="checklist">{checklist_html}</div>
       <textarea class="notes" placeholder="Notes (optional)">{notes}</textarea>

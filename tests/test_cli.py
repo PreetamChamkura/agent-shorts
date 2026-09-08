@@ -10,9 +10,9 @@ import pytest
 from clipper import paths
 from clipper.cli import (
     _manual_spec,
+    _narration_kwargs,
     _print_clip_list,
     _segment_from_file,
-    _vo_kwargs,
     _write_clips_out,
 )
 
@@ -81,27 +81,27 @@ def test_segment_from_file_missing_index_fails_loudly(tmp_path, monkeypatch):
 # --- VO kwarg derivation -----------------------------------------------------
 
 
-def test_vo_kwargs_empty_when_vo_script_null():
-    assert _vo_kwargs({"vo_script": None}) == {}
+def test_narration_kwargs_empty_when_vo_script_null():
+    assert _narration_kwargs({"vo_script": None}) == {}
 
 
-def test_vo_kwargs_empty_when_tts_failed():
+def test_narration_kwargs_empty_when_tts_failed():
     seg = {
         "vo_script": "line",
         "tts_failed": True,
         "punchline_at": 10.0,
         "vo_placement": "cold_open",
     }
-    assert _vo_kwargs(seg) == {}
+    assert _narration_kwargs(seg) == {}
 
 
-def test_vo_kwargs_present_for_good_segment():
+def test_narration_kwargs_present_for_good_segment():
     seg = {
         "vo_script": "a line",
         "punchline_at": 37.1,
         "vo_placement": "pre_punchline",
     }
-    assert _vo_kwargs(seg) == {"punchline_at": 37.1, "vo_placement": "pre_punchline"}
+    assert _narration_kwargs(seg) == {"punchline_at": 37.1, "vo_placement": "pre_punchline"}
 
 
 # --- clip command: visual gate layer 3 wired before select_clip -----------
@@ -504,3 +504,33 @@ def test_fetch_trending_command_forwards_language_and_min_followers(monkeypatch)
     # differently, and definitely not silently left at the "en"/250000 default.
     assert seen["language"] is None
     assert seen["min_followers"] is None
+
+
+def test_narration_kwargs_passes_the_caption_for_caption_only():
+    seg = {
+        "vo_script": None,
+        "on_screen_caption": "Her actual doctor is the one laughing hardest here.",
+        "vo_placement": "caption_only",
+        "punchline_at": 37.1,
+    }
+    assert _narration_kwargs(seg) == {
+        "on_screen_caption": "Her actual doctor is the one laughing hardest here."
+    }
+
+
+def test_narration_kwargs_caption_only_without_a_caption_renders_silent():
+    seg = {"vo_script": None, "on_screen_caption": None, "vo_placement": "caption_only"}
+    assert _narration_kwargs(seg) == {}
+
+
+def test_narration_kwargs_never_promotes_a_failed_vo_to_a_caption():
+    # A line written to be heard hasn't been checked against the held line's
+    # constraints — a TTS failure falls back to silence, not to text on screen.
+    seg = {
+        "vo_script": "a line",
+        "on_screen_caption": None,
+        "vo_placement": "cold_open",
+        "punchline_at": 37.1,
+        "tts_failed": True,
+    }
+    assert _narration_kwargs(seg) == {}

@@ -168,17 +168,41 @@ def _segment_from_file(video_id: str, n: int) -> dict:
     return match
 
 
-def _vo_kwargs(seg: dict) -> dict:
-    """{"punchline_at", "vo_placement"} when the segment has usable VO, else {}.
+def _narration_kwargs(seg: dict) -> dict:
+    """render() kwargs for this segment's narration mode, or {} for silence.
+
+    Three shapes, one per mode (CLAUDE.md "Narration modes"):
+      - spoken: {"punchline_at", "vo_placement"} — render() also checks that
+        vo_{n}.wav actually exists before mixing
+      - held:   {"on_screen_caption"} — no audio touched, so none of the VO
+        failure flags apply to it
+      - silent: {}
 
     A null vo_script, a stage-3.5 tts_failed flag, or a vo_duration_exceeded
-    flag (the cold_open pre-roll would push the render past 58s) all mean the
-    normal no-VO path — render() itself also checks that vo_{n}.wav exists
-    before mixing.
+    flag (the VO would consume the clip's own duration) all fall back to
+    silence rather than to a caption: a line written to be heard hasn't been
+    checked against the held line's very different constraints, and quietly
+    promoting it would put an unreviewed sentence on screen.
     """
+    from .select import CAPTION_ONLY
+
+    if str(seg.get("vo_placement", "")) == CAPTION_ONLY:
+        caption = seg.get("on_screen_caption")
+        return {"on_screen_caption": str(caption)} if caption else {}
     if seg.get("vo_script") is None or seg.get("tts_failed") or seg.get("vo_duration_exceeded"):
         return {}
     return {"punchline_at": float(seg["punchline_at"]), "vo_placement": str(seg["vo_placement"])}
+
+
+def _narration_summary(seg: dict) -> str:
+    """One-line narration description for the select/select-clip listings."""
+    from .select import CAPTION_ONLY
+
+    if str(seg.get("vo_placement", "")) == CAPTION_ONLY and seg.get("on_screen_caption"):
+        return f"[caption] {seg['on_screen_caption']}"
+    if seg.get("vo_script"):
+        return f"[{seg.get('vo_placement', 'vo')}] {seg['vo_script']}"
+    return "(no narration)"
 
 
 def _generate_thumbnail_safely(video_id: str, n: int, seg: dict, *, force: bool) -> None:
@@ -423,7 +447,7 @@ def main(argv: list[str] | None = None) -> None:
 
         out = select(args.video_id, force=args.force)
         for seg in out["segments"]:
-            vo = seg["vo_script"] or "(no VO)"
+            vo = _narration_summary(seg)
             print(
                 f"[{seg['n']}] {seg['start']:.1f}-{seg['end']:.1f}s  "
                 f"{seg['tone']:<9} conf={seg['confidence']:.2f}  {seg['caption_title']}\n"
@@ -436,7 +460,7 @@ def main(argv: list[str] | None = None) -> None:
 
         out = select_clip(args.video_id, force=args.force)
         for seg in out["segments"]:
-            vo = seg["vo_script"] or "(no VO)"
+            vo = _narration_summary(seg)
             print(
                 f"[{seg['n']}] {seg['start']:.1f}-{seg['end']:.1f}s  "
                 f"{seg['tone']:<9} conf={seg['confidence']:.2f}  {seg['caption_title']}\n"
@@ -502,7 +526,7 @@ def main(argv: list[str] | None = None) -> None:
             narrate(video_id, force=args.force)
             seg = _segment_from_file(video_id, args.n)
             start, end, tone = float(seg["start"]), float(seg["end"]), str(seg["tone"])
-            vo_kwargs = _vo_kwargs(seg)
+            vo_kwargs = _narration_kwargs(seg)
             loopable = bool(seg.get("loopable", False))
 
         out = render(
@@ -533,7 +557,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             seg = _segment_from_file(args.video_id, args.n)
             start, end, tone = float(seg["start"]), float(seg["end"]), str(seg["tone"])
-            vo_kwargs = _vo_kwargs(seg)
+            vo_kwargs = _narration_kwargs(seg)
             loopable = bool(seg.get("loopable", False))
 
         out = render(

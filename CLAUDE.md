@@ -32,7 +32,7 @@ work/{video_id}/
   source.info.json   1    yt-dlp metadata
   words.json         2    transcribe
   segments.json      3    select
-  vo_{n}.wav         3.5  narrate (absent when vo_script is null)
+  vo_{n}.wav         3.5  narrate (absent when vo_script is null — including every caption_only segment)
   vo_{n}.words.json  3.5  narrate, whisper timing for cold_open VO captions (same condition)
   caps_{n}.ass       4    render, kept for debugging
   out_{n}.mp4        4    render
@@ -68,7 +68,9 @@ Caching is load-bearing. Renders get re-run dozens of times while tuning. Re-run
     "hook": "prediction that aged badly",
     "caption_title": "HE HAD NO IDEA",
     "vo_script": "He said this three weeks before the exact thing he ruled out happened.",
+    "on_screen_caption": null,
     "vo_placement": "cold_open",
+    "narration_mode_reason": "the clip opens on dead air, so a spoken line costs nothing",
     "why": "setup 412.8 establishing his position, turn at 431, payoff 437.1, reaction to 441.2",
     "confidence": 0.82,
     "thumbnail_text": "\"HE RULED IT OUT\"",
@@ -135,7 +137,7 @@ This works with the rules below, not instead of them — still no hype, still no
 ### Rules
 
 - 8-20 words is the practical target — write to land one beat, not to fill a range. 35 is a hard ceiling, never something to write toward; a line has been drifting toward that ceiling by default, which is the wrong direction
-- One beat, not two. If the line joins two separate observations with "and," "but," or a comma, pick the stronger one and cut the rest — a single sharp claim beats two half-claims stitched together. ("The most searched woman on the internet is standing in his kitchen, and the entire stream has to sit through a debate about dip" is two jokes fighting each other — who she is, and what's mundanely happening instead — pick one)
+- One beat, not two. If the line joins two separate observations — with "and," "but," a comma, or a full stop between two sentences — pick the stronger one and cut the rest — a single sharp claim beats two half-claims stitched together. ("The most searched woman on the internet is standing in his kitchen, and the entire stream has to sit through a debate about dip" is two jokes fighting each other — who she is, and what's mundanely happening instead — pick one)
 - Present tense
 - Never describe what is visibly happening. The viewer has eyes. Add what they can't see: context, history, stakes, what happened next
 - Never open with "POV", "wait for it", "this is insane", "he cooked", or any variant. If the line could sit on any clip, it's a bad line
@@ -152,7 +154,9 @@ Read the line without the clip. Slightly curious means it works. If it only make
 
 Stronger bar: could you tell someone one true fact about this moment's backstory, history, or context that they wouldn't get from the clip alone? If the line only re-angles what's already visible, it's not there yet — that's the difference between commentary and captioning with extra words.
 
-Read it out loud. A natural pause where you'd take a breath mid-thought means it's probably two beats trying to be one — cut to the stronger half rather than keeping both.
+Two sentences are the same failure wearing different punctuation — a full stop between two independent claims is still two beats, and it slips past a rule that only names "and," "but," and commas (found in real output the first time `caption_only` fired). Read it out loud. A natural pause where you'd take a breath mid-thought means it's probably two beats trying to be one — cut to the stronger half rather than keeping both.
+
+Every rule above applies to a held `on_screen_caption` exactly as it does to a spoken `vo_script` — see Narration modes. Written for the eye instead of the ear is a delivery difference, never a different editorial bar.
 
 ### Good
 
@@ -274,6 +278,110 @@ Known limitation (see Known issues below): corner detection currently checks whe
 ```
 
 Gameplay audio is always discarded. Gameplay video comes from `assets/gameplay/*.mp4` at a random offset seeded by `{video_id}:{n}` so renders are reproducible and consecutive uploads differ.
+
+## Narration modes
+
+Three ways a segment's framing reaches the viewer, selected by `vo_placement`
+in stage 3 and mutually exclusive by construction:
+
+| mode | field | what it costs |
+|---|---|---|
+| `cold_open` | `vo_script` | audio — the source is silenced for `[0, vo_duration)` |
+| `pre_punchline` | `vo_script` | audio — the source is silenced from 1.2s before `punchline_at` |
+| `caption_only` | `on_screen_caption` | screen — nothing is silenced; a held line shares the frame with the clip's own captions |
+
+Both delivery fields null is the fourth, normal state: the clip needs no
+framing. `vo_placement` is unused then and should read `cold_open`.
+
+`vo_placement` is the authority when the model contradicts itself. Stage 3's
+`resolve_narration` nulls whichever delivery field doesn't belong to the chosen
+mode and keeps the segment — same warn-and-keep posture as the VO word ceiling.
+A segment must never ship with both, or the viewer reads one sentence while
+hearing a different one. The field name is a legacy wart: it predates there
+being a non-VO mode, and renaming it would invalidate every segments.json
+already on disk for no behavioural gain.
+
+`narration_mode_reason` is required and must name the actual trade — the
+specific sound a caption is protecting, or why speech beats text here. Same
+accountability mechanism as `why`'s located timestamps and visual_judge's
+`best_frame_reason`, for the same reason: an unjustified judgment field drifts.
+Warn-only; a thin reason is a signal to fix the prompt, never grounds to drop a
+real segment.
+
+**`caption_only` exists for one reason: some clips' own audio IS the payoff.**
+A laugh breaking, a scream, a voice cracking, a room going quiet. Both spoken
+placements silence a window of source audio, and that window can land directly
+on the thing being framed. A held line pays in screen space instead. The
+selection criteria live in prompts/select.md and prompts/select_clip.md —
+default is a spoken line, since the narrator is channel identity (see Narrator
+persona) and a caption is the exception taken for a stateable reason.
+
+`on_screen_caption` answers to every narrator-persona rule `vo_script` does —
+find the angle, one beat, 8-20 words, no hype. It is the same editorial line
+delivered to the eye instead of the ear, never a lower bar.
+
+**A caption is never a fallback for failed VO.** A `tts_failed` or
+`vo_duration_exceeded` segment renders silent, not captioned: a line written to
+be heard hasn't been checked against the held line's constraints, and promoting
+it would put an unreviewed sentence on screen.
+
+**Testing gap, not yet closed** (same shape as the visual gate's layer-3 note
+above). `caption_only` has fired exactly once on a real clip — the Doc ban clip
+(work/1932625054), rejected for VO because its opening carries the whole setup
+and the rest runs wall-to-wall with no window to silence, which is criterion 2
+verbatim. Re-running the same clip after the one-beat rule was tightened chose
+`cold_open` instead, with an equally defensible reason ("the payoff is a spoken
+line, not a sound"). Both reads are correct; the clip is genuinely borderline.
+So the mode is confirmed reachable and confirmed not to swallow everything
+(three real clips, two chose VO), but its real selection rate is uncharacterised
+and no clip is yet known to choose it reliably. Before trusting the criteria at
+batch scale, find one that should be unambiguous: a clip whose payoff is purely
+a sound — a laugh breaking, a scream, a room going quiet — with no spoken
+punchline anywhere in it.
+
+### Held caption geometry
+
+Rendered as a second ASS style in the same caption file, not a `drawtext` pass —
+`clipper.ass.held_caption_style` derives it from the tone's own styles.yaml
+block so it stays a tone lookup (font family, `primary` colour, `bold`
+inherited). Deliberate overrides, each load-bearing:
+
+- **Font 56, not 104.** A 20-word line at caption size is six lines of shouting.
+- **Its own band, derived from where the karaoke line sits.** Unlike a
+  `cold_open` VO — which silences the source and therefore correctly suppresses
+  the clip's own captions during its window — `caption_only` mutes nothing, so
+  the dialogue captions must keep running. The two blocks ARE on screen
+  together, always; the geometry is load-bearing, not defensive. Every tone but
+  `chaotic` runs its karaoke middle-centred (worst case y 772-1147), so the held
+  line takes the top band from y=250. `chaotic` runs its karaoke top-centred
+  (y 260-510), so its held line takes the bottom band instead, ending at y=1340,
+  60px clear of the y=1400 watermark. Always different thirds of the frame.
+- **Margins 180/180, not 70/70.** x 180-900, inside the horizontal safe zone and
+  still optically centred on 540. A line held for seconds has to clear the
+  right-hand like/comment/share rail; a single karaoke word flashing past does
+  not. (The karaoke's own 70/70 margins predate this and do reach x=1010 — a
+  real, pre-existing inconsistency with the Safe zones section, left alone here.)
+- **Outline/shadow scale with the font.** 9 and 5 are tuned for 104px glyphs.
+- **No uppercase, no animation.** It is a sentence of context, and its spoken
+  equivalent isn't shouted either. Nothing scales or recolours: the highlight
+  colour means "this word is being said right now" everywhere else in the
+  system, and reusing it here would collide semantically.
+- **Wrapped explicitly with `\N`.** `WrapStyle: 2` means libass does no word
+  wrapping of its own — only a hard break splits a line. The karaoke groups are
+  2-5 words and short enough that this has never surfaced; an 8-20 word held
+  line is not, so `clipper.ass.wrap_held_text` wraps deterministically instead
+  of hoping the renderer does. (Whether the 5-word `awkward` groups also overrun
+  at 104px is a separate, untested question — not touched here.)
+
+**Hold window is derived from the text, not from the model.** From the clip's
+first frame for `words * 0.4s + 1.0s`, clamped to 2.5-8.0s, then it clears —
+"set up, then get out" applies to a held line too. Deliberately not another
+model-supplied timestamp: this pipeline has already had two real
+timestamp-drift bugs (`end` short of the payoff quote, `punchline_at` 5.3s off
+it), and a hold window is the one piece of timing that needs no judgment at all.
+Constants live in `clipper.ass`; switch to a whole-clip hold there if a real
+render argues for it.
+
 
 ## Voiceover mixing
 

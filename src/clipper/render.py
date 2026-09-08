@@ -35,6 +35,17 @@ doesn't, it's a short interjection. Passing neither `punchline_at` nor
 `vo_placement` means no VO — the normal path when vo_script was null or TTS
 failed.
 
+`caption_only` (CLAUDE.md "Narration modes") is the third mode and the only
+one that touches no audio at all: `on_screen_caption` is held statically in
+its own band of the caption file while the source plays untouched, for a clip
+whose own sound IS the payoff and would be destroyed by silencing a window of
+it. It shares the ASS file and the tone lookup with the karaoke captions but
+not their band — clipper.ass.held_caption_style derives a non-colliding
+placement from the tone's own karaoke alignment. Unlike a cold_open VO, it
+does NOT suppress the clip's own captions: nothing is muted, so captioning
+the audible dialogue stays correct, and the two blocks are on screen together
+by design.
+
 Loop hold (CLAUDE.md: a `loopable` segment must end cleanly on the last frame
 so a platform's auto-repeat reads as seamless): when the caller passes
 ``loopable=True``, `end` is re-snapped to a word boundary (mirrors
@@ -56,7 +67,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from .ass import Word, build_ass
+from .ass import HeldCaption, Word, build_ass, held_caption_duration
 from .face_detect import find_face_region, is_small_corner_facecam
 from .ffmpeg import probe_duration, run_ffmpeg, run_ffprobe
 from .frames import mean_abs_diff, read_pgm_gray
@@ -493,6 +504,7 @@ def render(
     composition: str | None = None,
     punchline_at: float | None = None,
     vo_placement: str | None = None,
+    on_screen_caption: str | None = None,
     loopable: bool = False,
     force: bool = False,
 ) -> str:
@@ -515,6 +527,12 @@ def render(
     honored when work/{video_id}/vo_{n}.wav also exists — pass neither for the
     normal no-VO path (vo_script was null, or stage 3.5 flagged tts_failed).
 
+    ``on_screen_caption`` is the other narration mode (`caption_only`): one
+    held line of framing burned into the caption file, no audio touched at
+    all. Mutually exclusive with VO by construction — passing both raises,
+    rather than silently rendering a viewer a spoken sentence and a different
+    written one at the same time.
+
     ``loopable`` re-snaps `end` to a word boundary and to a stable (non-blink,
     non-motion-blurred) frame before encoding — see module docstring. False
     (the default) keeps current behavior exactly; pass segments.json's
@@ -526,6 +544,14 @@ def render(
         raise ValueError(
             f"render: unknown composition {composition!r}, expected one of "
             f"{COMPOSITIONS} or None (auto-detect)"
+        )
+
+    if on_screen_caption and vo_placement is not None:
+        raise ValueError(
+            "render: on_screen_caption and vo_placement are mutually exclusive narration "
+            f"modes (got caption {on_screen_caption!r} with placement {vo_placement!r}). "
+            "Stage 3 nulls whichever one doesn't match the chosen mode — a segment "
+            "carrying both means it was hand-assembled or written by something else."
         )
 
     duration = end - start
@@ -656,6 +682,21 @@ def render(
 
     clip_words = _clip_words(words, start, end)
 
+    # caption_only: one held line of framing, clipped to the segment so a
+    # short clip can never carry a hold that outlives it. Nothing is silenced
+    # — that's the whole reason this mode exists, so the clip's own captions
+    # keep running underneath it in their own band (clipper.ass).
+    held: HeldCaption | None = None
+    if on_screen_caption:
+        held_end = min(held_caption_duration(on_screen_caption), duration)
+        held = {"text": on_screen_caption, "start": 0.0, "end": held_end}
+        log.info(
+            "render: caption_only n=%d, held 0.00s-%.2fs: %r",
+            n,
+            held_end,
+            on_screen_caption,
+        )
+
     # A cold_open VO plays over the clip's own opening seconds (muted, video
     # keeps moving — CLAUDE.md) rather than a prepended pre-roll, so it gets
     # captioned too: the viewer should be able to read the line, not just
@@ -680,7 +721,7 @@ def render(
     else:
         if vo and vo["placement"] == "cold_open":
             log.info("render: n=%d cold_open with no vo_%d.words.json — captioning clip only", n, n)
-        ass_text = build_ass(clip_words, group_size, style_overrides)
+        ass_text = build_ass(clip_words, group_size, style_overrides, held)
         log.info(
             "render: wrote %s (%d caption words, tone=%s, group_size=%d)",
             ass_path,

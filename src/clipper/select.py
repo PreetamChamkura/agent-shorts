@@ -28,6 +28,14 @@ clips — CLAUDE.md step 2b): no windowing, one call against
 prompts/select_clip.md, boundaries already given rather than searched for —
 but the exact same validate_segment() and output schema as above.
 
+Narration mode (CLAUDE.md "Narration modes") is decided in this same call:
+`vo_placement` picks between spoken framing (`cold_open`/`pre_punchline`,
+carried by `vo_script`) and held visual framing (`caption_only`, carried by
+`on_screen_caption`), with both null when the clip needs no framing at all.
+Exactly one delivery field is ever non-null — `resolve_narration` enforces
+that, treating `vo_placement` as the authority and nulling the field that
+doesn't belong to the chosen mode rather than dropping the segment.
+
 Also produces the static thumbnail + upload-metadata fields (CLAUDE.md
 thumbnail + metadata generation step) in this SAME call, not a separate LLM
 call — context is already loaded, so `thumbnail_text` (a punchier, distinct
@@ -66,7 +74,21 @@ MIN_DURATION = 18.0
 MAX_DURATION = 58.0
 CONFIDENCE_FLOOR = 0.7
 VO_MAX_WORDS = 35  # CLAUDE.md narrator rules: 8-20 words is the target, 35 is the hard ceiling
-VALID_PLACEMENTS = ("cold_open", "pre_punchline")
+
+# Narration modes (CLAUDE.md "Narration modes"). `vo_placement` is the mode
+# selector, and it is the AUTHORITY when the model contradicts itself: the two
+# delivery fields are mutually exclusive, so whichever one doesn't belong to
+# the chosen mode gets nulled rather than the segment being dropped (see
+# validate_segment). The field name is a legacy wart — it predates there being
+# a non-VO mode — kept because renaming it would invalidate every segments.json
+# already on disk for no behavioural gain.
+CAPTION_ONLY = "caption_only"
+VALID_PLACEMENTS = ("cold_open", "pre_punchline", CAPTION_ONLY)
+
+# A held caption is the same editorial line as a vo_script, just delivered to
+# the eye instead of the ear, so it answers to the same word ceiling — see
+# CLAUDE.md's narrator rules, which apply to both modes without exception.
+CAPTION_MAX_WORDS = VO_MAX_WORDS
 
 # thumbnail_text soft bounds (CLAUDE.md thumbnail spec: "3-6 words max").
 # Enforced as a warn-and-keep, not a drop — see validate_segment: a strong
@@ -120,7 +142,9 @@ _RESPONSE_SCHEMA = {
                     "hook": {"type": "string"},
                     "caption_title": {"type": "string"},
                     "vo_script": {"type": ["string", "null"]},
+                    "on_screen_caption": {"type": ["string", "null"]},
                     "vo_placement": {"type": "string"},
+                    "narration_mode_reason": {"type": "string"},
                     "why": {"type": "string"},
                     "confidence": {"type": "number"},
                     "thumbnail_text": {"type": "string"},
@@ -146,7 +170,9 @@ _RESPONSE_SCHEMA = {
                     "hook",
                     "caption_title",
                     "vo_script",
+                    "on_screen_caption",
                     "vo_placement",
+                    "narration_mode_reason",
                     "why",
                     "confidence",
                     "thumbnail_text",
@@ -293,8 +319,80 @@ def _snap_end_forward(words: list[dict], raw_end: float) -> float:
     return min((float(w["end"]) for w in words), key=lambda e: abs(e - raw_end))
 
 
-def _vo_word_count(vo_script: str) -> int:
-    return len(vo_script.split())
+def _line_word_count(line: str) -> int:
+    """Words in a narrator line — a spoken vo_script or a held on_screen_caption.
+    One helper because they answer to one word ceiling (CLAUDE.md)."""
+    return len(line.split())
+
+
+def _clean_line(value: object) -> str | None:
+    """A narrator line stripped to None when it's absent or blank."""
+    if value is None:
+        return None
+    return str(value).strip() or None
+
+
+def resolve_narration(hook: str, raw: dict, placement: str) -> tuple[str | None, str | None]:
+    """Return the ``(vo_script, on_screen_caption)`` this segment actually ships.
+
+    Exactly one can be non-null: a spoken line and a held line are two ways to
+    deliver the same framing, and running both means the viewer reads one
+    sentence while hearing a different one. ``placement`` is the authority when
+    the model contradicts itself — it is the field where the model states the
+    mode it chose, so the delivery field that doesn't belong to that mode is the
+    one that gets dropped.
+
+    Nothing here can sink a segment. An over-long line, a contradiction, or a
+    caption_only with no caption all degrade to a quieter but still-valid
+    segment, the same warn-and-keep posture the VO ceiling has always had — a
+    real moment shouldn't be thrown away over how its framing is delivered.
+    """
+    vo_script = _clean_line(raw.get("vo_script"))
+    caption = _clean_line(raw.get("on_screen_caption"))
+
+    if vo_script is not None and _line_word_count(vo_script) > VO_MAX_WORDS:
+        log.warning(
+            "select: %r vo_script is %d words (ceiling %d) — nulling the line, keeping segment",
+            hook,
+            _line_word_count(vo_script),
+            VO_MAX_WORDS,
+        )
+        vo_script = None
+    if caption is not None and _line_word_count(caption) > CAPTION_MAX_WORDS:
+        log.warning(
+            "select: %r on_screen_caption is %d words (ceiling %d) — nulling it, keeping segment",
+            hook,
+            _line_word_count(caption),
+            CAPTION_MAX_WORDS,
+        )
+        caption = None
+
+    if placement == CAPTION_ONLY:
+        if vo_script is not None:
+            log.warning(
+                "select: %r is caption_only but also returned a vo_script (%r) — "
+                "dropping the VO, the two modes are exclusive",
+                hook,
+                vo_script,
+            )
+            vo_script = None
+        if caption is None:
+            log.warning(
+                "select: %r chose caption_only but left on_screen_caption empty — "
+                "rendering silent, keeping segment",
+                hook,
+            )
+        return None, caption
+
+    if caption is not None:
+        log.warning(
+            "select: %r is %s but also returned an on_screen_caption (%r) — "
+            "dropping the caption, the two modes are exclusive",
+            hook,
+            placement,
+            caption,
+        )
+    return vo_script, None
 
 
 # "payoff at N" — the model's own numeric marker. Not trustworthy on its own
@@ -496,19 +594,17 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
         log.info("select: dropped %r — bad vo_placement %r", hook, placement)
         return None
 
-    # A null vo_script is a normal path. An over-long one gets dropped to null
-    # and flagged rather than sinking an otherwise good segment.
-    vo_script = raw.get("vo_script")
-    if vo_script is not None:
-        vo_script = str(vo_script).strip() or None
-    if vo_script is not None and _vo_word_count(vo_script) > VO_MAX_WORDS:
-        log.warning(
-            "select: %r vo_script is %d words (ceiling %d) — nulling the line, keeping segment",
-            hook,
-            _vo_word_count(vo_script),
-            VO_MAX_WORDS,
-        )
-        vo_script = None
+    # Null on both is a normal path (nothing worth adding), not an error.
+    vo_script, on_screen_caption = resolve_narration(hook, raw, placement)
+
+    # The mode is a judgment call, so it gets the same accountability every
+    # other judgment field here has (`why`'s located timestamps,
+    # `best_frame_reason` in visual_judge): the model has to say what it
+    # traded. Warn-only — a thin reason is a signal to look at the prompt,
+    # never a reason to throw away a real segment.
+    narration_mode_reason = str(raw.get("narration_mode_reason", "")).strip()
+    if not narration_mode_reason:
+        log.warning("select: %r chose %s with no narration_mode_reason", hook, placement)
 
     caption_title = str(raw.get("caption_title", ""))
 
@@ -562,7 +658,9 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
         "hook": hook,
         "caption_title": caption_title,
         "vo_script": vo_script,
+        "on_screen_caption": on_screen_caption,
         "vo_placement": placement,
+        "narration_mode_reason": narration_mode_reason,
         "why": why,
         "confidence": round(confidence, 2),
         "thumbnail_text": thumbnail_text,
