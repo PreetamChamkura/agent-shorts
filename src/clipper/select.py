@@ -65,7 +65,7 @@ MARKER_INTERVAL = 15.0  # [h:mm:ss] markers, per prompts/select.md
 MIN_DURATION = 18.0
 MAX_DURATION = 58.0
 CONFIDENCE_FLOOR = 0.7
-VO_MAX_WORDS = 35  # CLAUDE.md narrator rules: 12-30 words, hard ceiling 35
+VO_MAX_WORDS = 35  # CLAUDE.md narrator rules: 8-20 words is the target, 35 is the hard ceiling
 VALID_PLACEMENTS = ("cold_open", "pre_punchline")
 
 # thumbnail_text soft bounds (CLAUDE.md thumbnail spec: "3-6 words max").

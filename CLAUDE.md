@@ -134,7 +134,8 @@ This works with the rules below, not instead of them — still no hype, still no
 
 ### Rules
 
-- 12-30 words, hard ceiling 35
+- 8-20 words is the practical target — write to land one beat, not to fill a range. 35 is a hard ceiling, never something to write toward; a line has been drifting toward that ceiling by default, which is the wrong direction
+- One beat, not two. If the line joins two separate observations with "and," "but," or a comma, pick the stronger one and cut the rest — a single sharp claim beats two half-claims stitched together. ("The most searched woman on the internet is standing in his kitchen, and the entire stream has to sit through a debate about dip" is two jokes fighting each other — who she is, and what's mundanely happening instead — pick one)
 - Present tense
 - Never describe what is visibly happening. The viewer has eyes. Add what they can't see: context, history, stakes, what happened next
 - Never open with "POV", "wait for it", "this is insane", "he cooked", or any variant. If the line could sit on any clip, it's a bad line
@@ -150,6 +151,8 @@ This works with the rules below, not instead of them — still no hype, still no
 Read the line without the clip. Slightly curious means it works. If it only makes sense after seeing the clip, it's describing rather than framing.
 
 Stronger bar: could you tell someone one true fact about this moment's backstory, history, or context that they wouldn't get from the clip alone? If the line only re-angles what's already visible, it's not there yet — that's the difference between commentary and captioning with extra words.
+
+Read it out loud. A natural pause where you'd take a breath mid-thought means it's probably two beats trying to be one — cut to the stronger half rather than keeping both.
 
 ### Good
 
