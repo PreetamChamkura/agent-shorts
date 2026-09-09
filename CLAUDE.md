@@ -273,7 +273,7 @@ Known limitation (see Known issues below): corner detection currently checks whe
 
 ```
 [comp]ass=work/{id}/caps_{n}.ass:fontsdir=./fonts[capped];
-[capped]drawtext=fontfile=./fonts/Montserrat-Bold.ttf:text='@FrameByFrameMoments':
+[capped]drawtext=fontfile=./fonts/Montserrat-Bold.ttf:text='@FrameByFrameMoments1':
   fontcolor=white@0.45:fontsize=40:x=(w-tw)/2:y=1400[vout]
 ```
 
