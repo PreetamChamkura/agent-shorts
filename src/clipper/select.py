@@ -23,6 +23,19 @@ Everything except `_call_model` is pure and unit-testable without network.
 Caching is load-bearing: segments.json is never regenerated unless `force`, so
 re-running stage 4 fifty times never re-calls the LLM.
 
+Real cost finding (a full per-call token reconstruction, not a guess): the
+fixed instructions in select.md/select_clip.md ran ~6,372 tokens versus
+~100-300 tokens of real per-clip data — over 95% of every call was
+byte-identical text, paid at full price every time, because nothing was ever
+split into a cached `system` block. `split_cacheable_prompt()` cuts each
+prompt file at its `PROMPT_CACHE_BOUNDARY` marker into the fixed remainder
+(sent as a cached `system` block) and the real per-call Source/transcript
+data (sent as the user turn, since it can never cache anyway) — measured
+~63% cheaper on a real same-session batch. `_call_model` also logs the real
+`response.usage` for every call (input/output/thinking/cache split) — before
+this, the pipeline logged nothing, so a cost audit had to replay prompts
+through `count_tokens` to reconstruct a lower-bound estimate after the fact.
+
 `select_clip()` is the stage 3 variant for a single pre-selected clip (Twitch
 clips — CLAUDE.md step 2b): no windowing, one call against
 prompts/select_clip.md, boundaries already given rather than searched for —
@@ -287,6 +300,75 @@ def render_prompt(template: str, **values: str) -> str:
         if key in values:
             out = out.replace("{" + key + "}", str(values[key]))
     return out
+
+
+# Real cost finding (measured, not estimated — a full per-call reconstruction
+# via count_tokens): the fixed instructions in select.md/select_clip.md run
+# ~6,372 tokens, versus ~100-300 tokens of real per-call Source/transcript
+# data — over 95% of every call was fixed text, paid at full price every
+# time, because nothing was ever split into a cacheable `system` block.
+# Placeholders only ever appear above this marker in both prompt files (the
+# Source + transcript sections); split_cacheable_prompt() cuts there so the
+# fixed remainder can be sent as a cached system prompt while the genuinely
+# per-call data — which can never cache anyway — stays in the user turn.
+_CACHE_BOUNDARY_MARKER = "<!-- PROMPT_CACHE_BOUNDARY:"
+
+
+def split_cacheable_prompt(template: str) -> tuple[str, str]:
+    """Split a prompt template into (dynamic_user_text, static_system_text)
+    at its `_CACHE_BOUNDARY_MARKER` HTML comment.
+
+    The static half must be byte-identical across every call to the same
+    prompt file to actually cache — checked here by construction: no
+    placeholder may appear on its side of the marker. Raises if the marker
+    is missing (a prompt edit deleted it — the split silently stops
+    happening) or if a placeholder leaked past it (a prompt edit would
+    silently ship literal `{video_title}` text on every cached call instead
+    of the real value). Both are real-drift failures, not edge cases to
+    tolerate quietly.
+    """
+    start = template.find(_CACHE_BOUNDARY_MARKER)
+    if start == -1:
+        raise ValueError(
+            f"split_cacheable_prompt: no {_CACHE_BOUNDARY_MARKER!r} marker in this prompt — "
+            "it must mark where the fixed instructions begin, or nothing can be cached"
+        )
+    end = template.find("-->", start)
+    if end == -1:
+        raise ValueError("split_cacheable_prompt: the PROMPT_CACHE_BOUNDARY comment never closes")
+
+    dynamic = template[:start].rstrip("\n") + "\n"
+    static = template[end + len("-->") :].lstrip("\n")
+    leaked = [p for p in _PLACEHOLDERS if "{" + p + "}" in static]
+    if leaked:
+        raise ValueError(
+            f"split_cacheable_prompt: placeholder(s) {leaked} appear AFTER the cache boundary — "
+            "they would never be substituted and would ship literally on every cached call"
+        )
+    return dynamic, static
+
+
+def _log_usage(video_id: str, model: str, usage) -> None:
+    """Real per-call token usage, logged unconditionally — the prerequisite
+    for ever auditing cost from logs instead of reconstructing it after the
+    fact (see CLAUDE.md's cost investigation: before this, the pipeline
+    logged nothing, so every real number had to be rebuilt from scratch by
+    replaying prompts through count_tokens). `thinking_tokens` is billed as
+    output but invisible in the visible response text — output_tokens_details
+    is the only place it shows up, and it's exactly the number that made the
+    earlier reconstruction a floor rather than the real total.
+    """
+    thinking = usage.output_tokens_details.thinking_tokens if usage.output_tokens_details else 0
+    log.info(
+        "select: usage %s model=%s in=%d cache_read=%d cache_write=%d out=%d(thinking=%d)",
+        video_id,
+        model,
+        usage.input_tokens,
+        usage.cache_read_input_tokens,
+        usage.cache_creation_input_tokens,
+        usage.output_tokens,
+        thinking,
+    )
 
 
 def parse_timestamps(text: str) -> list[float]:
@@ -750,15 +832,25 @@ def _source_metadata(wd) -> dict:
     }
 
 
-def _call_model(client, prompt: str, model: str) -> dict:
-    """The only networked call in this module. Returns the parsed JSON object."""
+def _call_model(client, video_id: str, system_text: str, user_text: str, model: str) -> dict:
+    """The only networked call in this module. Returns the parsed JSON object.
+
+    ``system_text`` is the prompt's fixed instructions (from
+    split_cacheable_prompt) — byte-identical across every call to the same
+    prompt file, sent as a cached system block so a batch's 2nd call onward
+    reads it at ~0.1x instead of paying full price again. ``user_text`` is
+    the real per-call Source/transcript data, which can never cache since
+    it's unique every time.
+    """
     response = client.messages.create(
         model=model,
         max_tokens=MAX_TOKENS,
         thinking={"type": "adaptive"},
+        system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
         output_config={"format": {"type": "json_schema", "schema": _RESPONSE_SCHEMA}},
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": user_text}],
     )
+    _log_usage(video_id, model, response.usage)
     if response.stop_reason == "refusal":
         raise RuntimeError(f"select: model refused the request ({response.stop_details})")
     text = next(b.text for b in response.content if b.type == "text")
@@ -797,6 +889,7 @@ def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
     )
 
     template = (PROMPTS_DIR / "select.md").read_text()
+    dynamic_template, static_prompt = split_cacheable_prompt(template)
     meta = _source_metadata(wd)
 
     import anthropic  # imported lazily so the pure helpers stay import-light
@@ -805,8 +898,8 @@ def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
 
     collected: list[dict] = []
     for win in windows:
-        prompt = render_prompt(
-            template,
+        user_prompt = render_prompt(
+            dynamic_template,
             window_index=str(win["index"]),
             window_total=str(win["total"]),
             window_start=format_hmmss(win["start"]),
@@ -822,7 +915,7 @@ def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
             format_hmmss(win["end"]),
             len(win["words"]),
         )
-        payload = _call_model(client, prompt, model)
+        payload = _call_model(client, video_id, static_prompt, user_prompt, model)
         raw_segments = payload.get("segments", [])
         for raw in raw_segments:
             seg = validate_segment(raw, words)
@@ -889,14 +982,15 @@ def select_clip(video_id: str, *, force: bool = False, model: str = MODEL) -> di
         return out
 
     template = (PROMPTS_DIR / "select_clip.md").read_text()
+    dynamic_template, static_prompt = split_cacheable_prompt(template)
     meta = _source_metadata(wd)
 
     import anthropic  # imported lazily so the pure helpers stay import-light
 
     client = anthropic.Anthropic()
 
-    prompt = render_prompt(
-        template,
+    user_prompt = render_prompt(
+        dynamic_template,
         window_index="1",
         window_total="1",
         window_start=format_hmmss(0.0),
@@ -911,7 +1005,7 @@ def select_clip(video_id: str, *, force: bool = False, model: str = MODEL) -> di
         len(words),
         model,
     )
-    response = _call_model(client, prompt, model)
+    response = _call_model(client, video_id, static_prompt, user_prompt, model)
     raw_segments = response.get("segments", [])
 
     collected: list[dict] = []

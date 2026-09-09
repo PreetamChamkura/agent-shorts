@@ -13,6 +13,11 @@ Full transcript of the clip, {window_start} to {window_end}. Timestamps in [h:mm
 
 {transcript_window}
 
+<!-- PROMPT_CACHE_BOUNDARY: everything below this line is fixed across every
+     call (no placeholders past this point) — sent as a cached system
+     prompt. Everything above goes in the per-call user turn. If you add a
+     placeholder, it MUST go above this line, or the cache never matches. -->
+
 ## Task
 
 Do not hunt for a better moment inside the clip, and do not second-guess its edges beyond the trimming described below.

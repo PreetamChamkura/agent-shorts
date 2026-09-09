@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +15,7 @@ from clipper.select import (
     DESCRIPTION_MAX_SENTENCES,
     DESCRIPTION_MIN_SENTENCES,
     MIN_DURATION,
+    PROMPTS_DIR,
     PUNCHLINE_DRIFT_TOLERANCE,
     _count_sentences,
     _distance_from_span,
@@ -20,6 +23,7 @@ from clipper.select import (
     _extract_payoff_quote,
     _find_phrase_end,
     _find_phrase_span,
+    _log_usage,
     _snap_end_forward,
     build_windows,
     dedupe,
@@ -30,6 +34,7 @@ from clipper.select import (
     resolve_narration,
     select_clip,
     snap_to_words,
+    split_cacheable_prompt,
     validate_segment,
     why_is_located,
 )
@@ -103,6 +108,101 @@ def test_render_prompt_substitutes_without_touching_json_braces():
 def test_render_prompt_rejects_unknown_placeholder():
     with pytest.raises(ValueError):
         render_prompt("hi", not_a_placeholder="x")
+
+
+# --- split_cacheable_prompt: real prompt-caching split ----------------------
+
+
+def _templated(dynamic="Source stuff {video_title}", static="## Task\nDo the thing."):
+    return (
+        f"{dynamic}\n\n"
+        "<!-- PROMPT_CACHE_BOUNDARY: everything below this line is fixed -->\n\n"
+        f"{static}"
+    )
+
+
+def test_split_cacheable_prompt_splits_at_the_marker():
+    dynamic, static = split_cacheable_prompt(_templated())
+    assert "{video_title}" in dynamic
+    assert "PROMPT_CACHE_BOUNDARY" not in dynamic
+    assert "PROMPT_CACHE_BOUNDARY" not in static
+    assert "## Task" in static
+
+
+def test_split_cacheable_prompt_raises_without_a_marker():
+    with pytest.raises(ValueError, match="no.*marker"):
+        split_cacheable_prompt("no marker anywhere in here")
+
+
+def test_split_cacheable_prompt_raises_on_unclosed_comment():
+    broken = "stuff\n<!-- PROMPT_CACHE_BOUNDARY: never closes\nmore stuff"
+    with pytest.raises(ValueError, match="never closes"):
+        split_cacheable_prompt(broken)
+
+
+def test_split_cacheable_prompt_raises_on_placeholder_after_the_boundary():
+    # A placeholder below the marker would ship literal "{video_title}" text
+    # on every cached call instead of the real value -- must fail loudly.
+    leaky = _templated(static="## Task\nUse {video_title} here.")
+    with pytest.raises(ValueError, match="video_title"):
+        split_cacheable_prompt(leaky)
+
+
+def test_split_cacheable_prompt_real_prompt_files_split_cleanly():
+    # The actual shipped prompts -- not a synthetic fixture. Every real
+    # placeholder must land above the boundary in both.
+    for name in ("select.md", "select_clip.md"):
+        template = (PROMPTS_DIR / name).read_text()
+        dynamic, static = split_cacheable_prompt(template)
+        assert "## Task" in static
+        assert "{transcript_window}" in dynamic
+        assert "{transcript_window}" not in static
+
+
+# --- _log_usage: real per-call cost visibility ------------------------------
+# Never exercised through a mocked _call_model (every test above replaces it
+# wholesale), so this is the only coverage this logging line gets.
+
+
+def _fake_usage(**over):
+    base = dict(
+        input_tokens=6581,
+        output_tokens=629,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+        output_tokens_details=SimpleNamespace(thinking_tokens=1200),
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_log_usage_logs_the_real_split(caplog):
+    caplog.set_level(logging.INFO)
+    _log_usage("vid1", "claude-opus-5", _fake_usage())
+    assert "in=6581" in caplog.text
+    assert "out=629" in caplog.text
+    assert "thinking=1200" in caplog.text
+    assert "claude-opus-5" in caplog.text
+    assert "vid1" in caplog.text
+
+
+def test_log_usage_reports_cache_read_and_write(caplog):
+    caplog.set_level(logging.INFO)
+    _log_usage(
+        "vid1",
+        "claude-opus-5",
+        _fake_usage(cache_read_input_tokens=6372, cache_creation_input_tokens=6372),
+    )
+    assert "cache_read=6372" in caplog.text
+    assert "cache_write=6372" in caplog.text
+
+
+def test_log_usage_handles_missing_output_tokens_details():
+    # Defensive: some SDK responses (or a future API change) could omit
+    # output_tokens_details entirely -- must not crash the whole call over
+    # a logging line.
+    usage = _fake_usage(output_tokens_details=None)
+    _log_usage("vid1", "claude-opus-5", usage)  # must not raise
 
 
 # --- why validation ---------------------------------------------------------
@@ -612,11 +712,21 @@ def test_select_clip_calls_model_once_and_validates(tmp_path, monkeypatch):
     monkeypatch.setattr(
         select_mod,
         "_call_model",
-        lambda client, prompt, model: calls.append(prompt) or {"segments": [raw_segment]},
+        lambda client, video_id, system_text, user_text, model: calls.append(
+            (system_text, user_text)
+        )
+        or {"segments": [raw_segment]},
     )
 
     out = select_clip("clipid")
     assert len(calls) == 1
+    system_text, user_text = calls[0]
+    # the split actually happened: fixed instructions in the system half,
+    # real per-clip data (a placeholder value only the dynamic half gets) in
+    # the user half — not the same string twice, and not swapped.
+    assert "## Task" in system_text
+    assert "{transcript_window}" not in system_text
+    assert "## Source" in user_text
     assert len(out["segments"]) == 1
     seg = out["segments"][0]
     assert seg["n"] == 0

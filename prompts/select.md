@@ -13,6 +13,11 @@ Window {window_index} of {window_total}, covering {window_start} to {window_end}
 
 {transcript_window}
 
+<!-- PROMPT_CACHE_BOUNDARY: everything below this line is fixed across every
+     call (no placeholders past this point) — sent as a cached system
+     prompt. Everything above goes in the per-call user turn. If you add a
+     placeholder, it MUST go above this line, or the cache never matches. -->
+
 ## Task
 
 Find up to 3 self-contained moments that would work as standalone vertical shorts. Return fewer — including zero — if the window doesn't contain them. Most windows contain zero or one. Three mediocre segments is worse than one good one.

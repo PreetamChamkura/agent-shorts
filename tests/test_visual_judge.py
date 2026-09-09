@@ -8,15 +8,62 @@ manually against real credentials in the session, not here.
 
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
+
 import pytest
 
 from clipper.visual_judge import (
     N_SAMPLE_FRAMES,
     _build_prompt,
+    _log_usage,
     _sample_timestamps,
     judge_clip,
     resolve_composition,
 )
+
+# --- _log_usage: real per-call cost visibility ------------------------------
+# Never exercised through a mocked _call_model (every test below replaces it
+# wholesale), so this is the only coverage this logging line gets.
+
+
+def _fake_usage(**over):
+    base = dict(
+        input_tokens=4790,
+        output_tokens=230,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+        output_tokens_details=SimpleNamespace(thinking_tokens=400),
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_log_usage_logs_the_real_split(caplog):
+    caplog.set_level(logging.INFO)
+    _log_usage("vid1", "claude-sonnet-5", _fake_usage())
+    assert "in=4790" in caplog.text
+    assert "out=230" in caplog.text
+    assert "thinking=400" in caplog.text
+    assert "claude-sonnet-5" in caplog.text
+    assert "vid1" in caplog.text
+
+
+def test_log_usage_reports_cache_read_and_write(caplog):
+    caplog.set_level(logging.INFO)
+    _log_usage(
+        "vid1",
+        "claude-sonnet-5",
+        _fake_usage(cache_read_input_tokens=1275, cache_creation_input_tokens=1275),
+    )
+    assert "cache_read=1275" in caplog.text
+    assert "cache_write=1275" in caplog.text
+
+
+def test_log_usage_handles_missing_output_tokens_details():
+    usage = _fake_usage(output_tokens_details=None)
+    _log_usage("vid1", "claude-sonnet-5", usage)  # must not raise
+
 
 # --- _sample_timestamps ------------------------------------------------
 
@@ -157,7 +204,7 @@ def test_judge_clip_returns_structured_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, prompt, paths_, model: {"passed": False, "reason": "static"},
+        lambda client, video_id, prompt, paths_, model: {"passed": False, "reason": "static"},
     )
 
     result = judge_clip("vid1")
@@ -179,7 +226,10 @@ def test_judge_clip_pass_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, prompt, paths_, model: {"passed": True, "reason": "real motion throughout"},
+        lambda client, video_id, prompt, paths_, model: {
+            "passed": True,
+            "reason": "real motion throughout",
+        },
     )
 
     result = judge_clip("vid1")
@@ -218,7 +268,9 @@ def test_judge_clip_uses_facecam_split_video_chain_when_detected(tmp_path, monke
         lambda source, ts, video_fc, out_path: out_path.write_bytes(b"x"),
     )
     monkeypatch.setattr(
-        vj, "_call_model", lambda client, prompt, paths_, model: {"passed": True, "reason": "fine"}
+        vj,
+        "_call_model",
+        lambda client, video_id, prompt, paths_, model: {"passed": True, "reason": "fine"},
     )
 
     result = judge_clip("vid1")
@@ -288,7 +340,7 @@ def test_judge_clip_maps_best_frame_index_to_its_timestamp(tmp_path, monkeypatch
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,
@@ -317,7 +369,7 @@ def test_judge_clip_best_frame_index_accounts_for_extraction_gaps(tmp_path, monk
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 1,
@@ -343,7 +395,7 @@ def test_judge_clip_out_of_range_best_frame_index_falls_back_to_zero(tmp_path, m
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 99,
@@ -400,7 +452,7 @@ def test_judge_clip_best_frame_reason_matching_index_is_trusted(tmp_path, monkey
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,
@@ -426,7 +478,7 @@ def test_judge_clip_best_frame_reason_mismatch_falls_back_to_zero(tmp_path, monk
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,
@@ -455,7 +507,7 @@ def test_judge_clip_best_frame_reason_missing_falls_back_to_zero(tmp_path, monke
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,

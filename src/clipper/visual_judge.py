@@ -214,9 +214,38 @@ def _build_prompt(composition: str, n_frames: int) -> str:
     )
 
 
-def _call_model(client, prompt: str, image_paths: list[Path], model: str) -> dict:
-    """The only networked call in this module. Returns the parsed JSON verdict."""
-    content: list[dict] = [{"type": "text", "text": prompt}]
+def _log_usage(video_id: str, model: str, usage) -> None:
+    """Real per-call token usage, logged unconditionally — see CLAUDE.md's
+    cost investigation. Duplicated from clipper.select's own _log_usage
+    rather than imported, per this project's stage-independence convention
+    (each stage module stays self-contained). `thinking_tokens` is billed as
+    output but never appears in the visible response text; it's the exact
+    gap that made an after-the-fact cost reconstruction only a floor."""
+    thinking = usage.output_tokens_details.thinking_tokens if usage.output_tokens_details else 0
+    log.info(
+        "visual_judge: usage %s model=%s in=%d cache_read=%d cache_write=%d out=%d(thinking=%d)",
+        video_id,
+        model,
+        usage.input_tokens,
+        usage.cache_read_input_tokens,
+        usage.cache_creation_input_tokens,
+        usage.output_tokens,
+        thinking,
+    )
+
+
+def _call_model(client, video_id: str, prompt: str, image_paths: list[Path], model: str) -> dict:
+    """The only networked call in this module. Returns the parsed JSON verdict.
+
+    ``prompt`` goes in a cached `system` block, not the user turn: real
+    measurement shows this text varies only by composition (2 real values)
+    and occasionally by frame count (almost always 5) — effectively
+    constant, not genuinely per-clip data — so it caches at ~0.1x on every
+    call after the first with the same composition. Only the real,
+    genuinely-unique-per-clip images go in the user turn, where they can
+    never cache anyway.
+    """
+    content: list[dict] = []
     for path in image_paths:
         b64 = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
         content.append(
@@ -230,9 +259,11 @@ def _call_model(client, prompt: str, image_paths: list[Path], model: str) -> dic
         model=model,
         max_tokens=MAX_TOKENS,
         thinking={"type": "adaptive"},
+        system=[{"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}}],
         output_config={"format": {"type": "json_schema", "schema": _JUDGE_SCHEMA}},
         messages=[{"role": "user", "content": content}],
     )
+    _log_usage(video_id, model, response.usage)
     if response.stop_reason == "refusal":
         raise RuntimeError(f"visual_judge: model refused the request ({response.stop_details})")
     text = next(b.text for b in response.content if b.type == "text")
@@ -311,7 +342,7 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
             raise RuntimeError(f"visual_judge: no preview frames extracted for {video_id}")
 
         prompt = _build_prompt(composition, len(frame_paths))
-        verdict = _call_model(client, prompt, frame_paths, model)
+        verdict = _call_model(client, video_id, prompt, frame_paths, model)
 
     # best_frame_index refers to the model's own numbering of the images it
     # was actually shown (0..len(frame_paths)-1) — that's frame_paths' order,
