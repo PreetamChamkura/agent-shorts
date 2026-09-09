@@ -725,8 +725,8 @@ def test_write_metadata_upload_txt_is_plain_no_quotes_or_json(tmp_path, monkeypa
     write_metadata("vid1", 0, seg)
     text = (wd / "upload_0.txt").read_text()
 
-    assert "Title:" in text
-    assert "Description:" in text
+    assert "TITLE:" in text
+    assert "DESCRIPTION:" in text
     assert seg["suggested_title"] in text
     assert seg["suggested_description"] in text
     # Copy-paste-ready: no surrounding quotes or JSON punctuation around the

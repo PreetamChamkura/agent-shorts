@@ -102,12 +102,16 @@ CAPTION_MAX_WORDS = VO_MAX_WORDS
 THUMBNAIL_TEXT_MIN_WORDS = 3
 THUMBNAIL_TEXT_MAX_WORDS = 6
 
-# suggested_description soft bounds (CLAUDE.md: "2-4 sentences"). Same
-# warn-and-keep posture as thumbnail_text's word count above — a sentence
-# count off by one is a reason to look at the field, not to drop a real
-# segment over a marketing field.
-DESCRIPTION_MIN_SENTENCES = 2
-DESCRIPTION_MAX_SENTENCES = 4
+# suggested_description soft bounds (CLAUDE.md: one sentence of context +
+# the credit line + hashtags — 2-4 sentences was the original spec, tightened
+# down since a real generated description at that length read as padded).
+# The credit line can land as its own sentence or fused into the context
+# sentence, so 1-2 is the real range, not a fixed count. Same warn-and-keep
+# posture as thumbnail_text's word count above — a sentence count off is a
+# reason to look at the field, not to drop a real segment over a marketing
+# field.
+DESCRIPTION_MIN_SENTENCES = 1
+DESCRIPTION_MAX_SENTENCES = 2
 
 # How far punchline_at may sit outside the quoted payoff's own real
 # transcript span before it's treated as drifted rather than ordinary

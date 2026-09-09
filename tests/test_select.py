@@ -10,8 +10,11 @@ from clipper import paths
 from clipper import select as select_mod
 from clipper.select import (
     CAPTION_ONLY,
+    DESCRIPTION_MAX_SENTENCES,
+    DESCRIPTION_MIN_SENTENCES,
     MIN_DURATION,
     PUNCHLINE_DRIFT_TOLERANCE,
+    _count_sentences,
     _distance_from_span,
     _extract_payoff_marker,
     _extract_payoff_quote,
@@ -487,6 +490,54 @@ def test_validate_segment_out_of_range_hashtag_count_keeps_segment(caplog):
     seg = validate_segment(_raw(suggested_hashtags=["#one"]), _words(60))
     assert seg is not None
     assert seg["suggested_hashtags"] == ["#one"]
+
+
+# --- suggested_description: one sentence + credit line + hashtags, not -----
+# 2-4 sentences (tightened after a real generated description at that length
+# read as padded — see CLAUDE.md's Thumbnail + upload metadata section).
+
+
+def test_description_sentence_bounds_are_one_to_two():
+    # The credit line can fuse into the context sentence (1) or stand on
+    # its own (2) — either is a valid minimal description, not a fixed count.
+    assert DESCRIPTION_MIN_SENTENCES == 1
+    assert DESCRIPTION_MAX_SENTENCES == 2
+
+
+def test_count_sentences_counts_fused_context_and_credit_as_one():
+    assert _count_sentences("Hasan reads a tweet live, credit to HasanAbi on Twitch.") == 1
+
+
+def test_count_sentences_counts_separate_credit_line_as_two():
+    assert _count_sentences("Hasan reads a tweet live. Clip via HasanAbi on Twitch.") == 2
+
+
+def test_validate_segment_accepts_one_sentence_description():
+    seg = validate_segment(
+        _raw(
+            suggested_description=(
+                "Hasan reads a tweet live, credit to HasanAbi on Twitch. #hasanabi #twitchdrama"
+            ),
+            suggested_hashtags=["#hasanabi", "#twitchdrama"],
+        ),
+        _words(60),
+    )
+    assert seg is not None
+    assert seg["suggested_description"].startswith("Hasan reads a tweet live")
+
+
+def test_validate_segment_warns_but_keeps_a_description_over_the_new_tighter_bound(caplog):
+    # The OLD spec's 2-4 sentence target now overshoots the new 1-2 bound —
+    # still warn-and-keep, never a dropped segment, same posture as every
+    # other marketing field here.
+    padded = (
+        "Hasan reads a tweet live on stream. He can't believe what it says. "
+        "Clip via HasanAbi on Twitch. #hasanabi #twitchdrama"
+    )
+    seg = validate_segment(_raw(suggested_description=padded), _words(60))
+    assert seg is not None
+    assert seg["suggested_description"] == padded
+    assert "want 1-2" in caplog.text
 
 
 # --- dedupe -----------------------------------------------------------------

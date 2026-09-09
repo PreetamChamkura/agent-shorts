@@ -850,10 +850,19 @@ def _format_upload_text(seg: dict) -> str:
     """Plain-text, copy-paste-ready rendering of the upload fields — no
     quotes, no JSON syntax, nothing a form field would choke on. Labeled
     blocks rather than one undifferentiated blob so "select from after
-    'Title:' to the blank line" works as cleanly as "select all"."""
+    'TITLE:' to the blank line" works as cleanly as "select all".
+
+    Title and description ONLY — deliberately not everything
+    metadata_{n}.json carries. thumbnail_text, caption_title, and tone are
+    internal/render-use fields (thumbnail_text drives the burned-in
+    overlay, caption_title is the video's own on-screen title, tone drives
+    styling) and were never meant to be read at upload time; including them
+    here would make this file something a human has to edit before
+    pasting, defeating the point of a copy-paste-ready file.
+    """
     title = str(seg.get("suggested_title", "")).strip()
     description = str(seg.get("suggested_description", "")).strip()
-    return f"Title:\n{title}\n\nDescription:\n{description}\n"
+    return f"TITLE:\n{title}\n\nDESCRIPTION:\n{description}\n"
 
 
 def write_metadata(video_id: str, n: int, seg: dict, *, force: bool = False) -> tuple[str, str]:
