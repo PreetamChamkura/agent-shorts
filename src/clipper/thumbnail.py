@@ -2,7 +2,10 @@
 
 Reads: work/{video_id}/source.mp4, work/{video_id}/visual_judge.json
        (optional — Twitch clips only, see select_thumbnail_timestamp)
-Writes: work/{video_id}/thumbnail_{n}.jpg, work/{video_id}/metadata_{n}.json
+Writes: work/{video_id}/thumbnail_{n}.jpg, work/{video_id}/metadata_{n}.json,
+        work/{video_id}/upload_{n}.txt (plain-text title+description, for
+        pasting directly into an upload form — metadata_{n}.json's quoting
+        and braces aren't)
 
 Why this exists at all (2026 platform research, see CLAUDE.md): YouTube
 Shorts' custom-thumbnail feature (July 2026) is YPP + Studio-desktop only —
@@ -843,17 +846,33 @@ def generate_thumbnail(
     return str(out_path)
 
 
-def write_metadata(video_id: str, n: int, seg: dict, *, force: bool = False) -> str:
-    """Write work/{video_id}/metadata_{n}.json — suggested_title,
-    thumbnail_text, and suggested_hashtags from segments.json, for a human
-    to copy in at manual upload time. Not embedded anywhere in the video or
-    thumbnail; upload stays manual per CLAUDE.md's Out of scope.
+def _format_upload_text(seg: dict) -> str:
+    """Plain-text, copy-paste-ready rendering of the upload fields — no
+    quotes, no JSON syntax, nothing a form field would choke on. Labeled
+    blocks rather than one undifferentiated blob so "select from after
+    'Title:' to the blank line" works as cleanly as "select all"."""
+    title = str(seg.get("suggested_title", "")).strip()
+    description = str(seg.get("suggested_description", "")).strip()
+    return f"Title:\n{title}\n\nDescription:\n{description}\n"
+
+
+def write_metadata(video_id: str, n: int, seg: dict, *, force: bool = False) -> tuple[str, str]:
+    """Write work/{video_id}/metadata_{n}.json (suggested_title,
+    thumbnail_text, suggested_hashtags, suggested_description from
+    segments.json — structured, for tooling) and work/{video_id}/upload_{n}.txt
+    (title + description as plain text — for a human to select-all and paste
+    directly into YouTube Studio's own form fields, which the JSON's quoting
+    and braces are not directly usable in). Neither is embedded anywhere in
+    the video or thumbnail; upload stays manual per CLAUDE.md's Out of scope.
+
+    Returns (metadata_json_path, upload_txt_path).
     """
     wd = work_dir(video_id)
     out_path = wd / f"metadata_{n}.json"
-    if out_path.exists() and not force:
+    txt_path = wd / f"upload_{n}.txt"
+    if out_path.exists() and txt_path.exists() and not force:
         log.info("thumbnail: metadata cache hit for n=%d (%s), skipping", n, out_path)
-        return str(out_path)
+        return str(out_path), str(txt_path)
 
     payload = {
         "video_id": video_id,
@@ -861,9 +880,11 @@ def write_metadata(video_id: str, n: int, seg: dict, *, force: bool = False) -> 
         "suggested_title": seg.get("suggested_title", ""),
         "thumbnail_text": seg.get("thumbnail_text", ""),
         "suggested_hashtags": seg.get("suggested_hashtags", []),
+        "suggested_description": seg.get("suggested_description", ""),
         "caption_title": seg.get("caption_title", ""),
         "tone": seg.get("tone", ""),
     }
     out_path.write_text(json.dumps(payload, indent=2))
-    log.info("thumbnail: wrote %s", out_path)
-    return str(out_path)
+    txt_path.write_text(_format_upload_text(seg))
+    log.info("thumbnail: wrote %s and %s", out_path, txt_path)
+    return str(out_path), str(txt_path)

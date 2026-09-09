@@ -433,7 +433,8 @@ def test_thumbnail_command_calls_generate_thumbnail_and_write_metadata(monkeypat
         thumbnail_mod,
         "write_metadata",
         lambda video_id, n, s, **k: (
-            seen_meta.update(video_id=video_id, n=n, **k) or "work/vid1/metadata_0.json"
+            seen_meta.update(video_id=video_id, n=n, **k)
+            or ("work/vid1/metadata_0.json", "work/vid1/upload_0.txt")
         ),
     )
 

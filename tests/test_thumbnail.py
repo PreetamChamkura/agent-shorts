@@ -700,29 +700,75 @@ def test_write_metadata_writes_expected_fields(tmp_path, monkeypatch):
         "suggested_title": "He ruled this out three weeks before it happened",
         "thumbnail_text": '"I DIDN\'T EVEN SEE HIM"',
         "suggested_hashtags": ["#valorant", "#clutch", "#shroud"],
+        "suggested_description": (
+            "He calls this three weeks before it happens. Clip via Shroud on Twitch. "
+            "#valorant #clutch #shroud"
+        ),
         "caption_title": "HE HAD NO IDEA",
         "tone": "revealing",
     }
-    out = write_metadata("vid1", 0, seg)
+    json_out, txt_out = write_metadata("vid1", 0, seg)
     data = json.loads((wd / "metadata_0.json").read_text())
     assert data["video_id"] == "vid1"
     assert data["suggested_hashtags"] == ["#valorant", "#clutch", "#shroud"]
-    assert out == str(wd / "metadata_0.json")
+    assert data["suggested_description"] == seg["suggested_description"]
+    assert json_out == str(wd / "metadata_0.json")
+    assert txt_out == str(wd / "upload_0.txt")
+
+
+def test_write_metadata_upload_txt_is_plain_no_quotes_or_json(tmp_path, monkeypatch):
+    wd = _setup(tmp_path, monkeypatch)
+    seg = {
+        "suggested_title": "He ruled this out three weeks before it happened",
+        "suggested_description": "He calls it early. Clip via Shroud on Twitch. #valorant",
+    }
+    write_metadata("vid1", 0, seg)
+    text = (wd / "upload_0.txt").read_text()
+
+    assert "Title:" in text
+    assert "Description:" in text
+    assert seg["suggested_title"] in text
+    assert seg["suggested_description"] in text
+    # Copy-paste-ready: no surrounding quotes or JSON punctuation around the
+    # actual field values.
+    assert '"' not in text
+    assert "{" not in text and "}" not in text
 
 
 def test_write_metadata_cache_hit_skips_rewrite(tmp_path, monkeypatch):
     wd = _setup(tmp_path, monkeypatch)
     (wd / "metadata_0.json").write_text(json.dumps({"stale": True}))
+    (wd / "upload_0.txt").write_text("stale")
 
     write_metadata("vid1", 0, {"suggested_title": "new"})
     data = json.loads((wd / "metadata_0.json").read_text())
     assert data == {"stale": True}
+    assert (wd / "upload_0.txt").read_text() == "stale"
+
+
+def test_write_metadata_backfills_upload_txt_for_metadata_predating_it(tmp_path, monkeypatch):
+    # A metadata_0.json written before upload_{n}.txt existed shouldn't need
+    # --force to get the new file — same backfill posture as narrate.py's
+    # vo_words.json backfill for a VO line synthesized before that existed.
+    wd = _setup(tmp_path, monkeypatch)
+    (wd / "metadata_0.json").write_text(json.dumps({"suggested_title": "old"}))
+    assert not (wd / "upload_0.txt").exists()
+
+    write_metadata("vid1", 0, {"suggested_title": "new", "suggested_description": "desc"})
+    data = json.loads((wd / "metadata_0.json").read_text())
+    # Backfilling the txt file regenerates the json too — they're written
+    # together, and there's no cache-valid state with only one of the two.
+    assert data["suggested_title"] == "new"
+    assert (wd / "upload_0.txt").exists()
+    assert "new" in (wd / "upload_0.txt").read_text()
 
 
 def test_write_metadata_force_overwrites(tmp_path, monkeypatch):
     wd = _setup(tmp_path, monkeypatch)
     (wd / "metadata_0.json").write_text(json.dumps({"stale": True}))
+    (wd / "upload_0.txt").write_text("stale")
 
     write_metadata("vid1", 0, {"suggested_title": "new"}, force=True)
     data = json.loads((wd / "metadata_0.json").read_text())
     assert data["suggested_title"] == "new"
+    assert "new" in (wd / "upload_0.txt").read_text()

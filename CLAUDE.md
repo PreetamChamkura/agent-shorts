@@ -36,8 +36,9 @@ work/{video_id}/
   vo_{n}.words.json  3.5  narrate, whisper timing for cold_open VO captions (same condition)
   caps_{n}.ass       4    render, kept for debugging
   out_{n}.mp4        4    render
-  thumbnail_{n}.jpg  4    thumbnail (standalone `clipper thumbnail`, not yet wired into clip/render by default)
-  metadata_{n}.json  4    thumbnail (same command)
+  thumbnail_{n}.jpg  4    thumbnail — runs automatically as clip's last step; `clipper thumbnail` also available standalone (e.g. after rejecting a thumbnail in review without re-rendering)
+  metadata_{n}.json  4    thumbnail (same command) — structured, for tooling
+  upload_{n}.txt     4    thumbnail (same command) — plain text, for pasting into the upload form directly
   review.json        5    approve/reject
 ```
 
@@ -136,8 +137,10 @@ This works with the rules below, not instead of them — still no hype, still no
 
 ### Rules
 
-- 8-20 words is the practical target — write to land one beat, not to fill a range. 35 is a hard ceiling, never something to write toward; a line has been drifting toward that ceiling by default, which is the wrong direction
-- One beat, not two. If the line joins two separate observations — with "and," "but," a comma, or a full stop between two sentences — pick the stronger one and cut the rest — a single sharp claim beats two half-claims stitched together. ("The most searched woman on the internet is standing in his kitchen, and the entire stream has to sit through a debate about dip" is two jokes fighting each other — who she is, and what's mundanely happening instead — pick one)
+- 2-6 words is the practical target — the same punchy register as `thumbnail_text`, not narration. 8-20 words is now an outer allowance for a beat that genuinely can't compress further, not the normal target it used to be; 35 stays the hard ceiling, never something to write toward. Shorter is better at every tier, not just acceptable — a line has repeatedly drifted toward the upper end by default, and that's the wrong direction whether the upper end is 6, 20, or 35
+- A full grammatical sentence is not required, and chasing one usually fights brevity directly. Fragments are fine — dropped articles, dropped verbs, a clause with no subject — as long as the angle still lands
+- Cutting words is not the same job as cutting the point. The angle named under "Find the angle before writing" above still has to survive the cut — what gets trimmed is the connective tissue around it (articles, hedges, restating what's visible), never the specific thing that makes the moment land
+- One beat, not two — this compounds with the word-count tightening above, it doesn't get replaced by it; a shorter line can still smuggle in two claims. If the line joins two separate observations — with "and," "but," a comma, or a full stop between two sentences — pick the stronger one and cut the rest — a single sharp claim beats two half-claims stitched together. ("The most searched woman on the internet is standing in his kitchen, and the entire stream has to sit through a debate about dip" is two jokes fighting each other — who she is, and what's mundanely happening instead — pick one)
 - Present tense
 - Never describe what is visibly happening. The viewer has eyes. Add what they can't see: context, history, stakes, what happened next
 - Never open with "POV", "wait for it", "this is insane", "he cooked", or any variant. If the line could sit on any clip, it's a bad line
@@ -147,6 +150,11 @@ This works with the rules below, not instead of them — still no hype, still no
 - Mild profanity at most; advertiser-friendly by default
 - Name the source when known and it adds context
 - Use punctuation for pacing, not for hype. A short pause via an em-dash or ellipsis before the key word helps TTS delivery land naturally — but the words on either side of the pause still have to follow every other rule here
+
+Too long vs. the actual target register — the gap is a full sentence vs. a fragment that keeps the same angle:
+
+- Too long: "A stand-up set's closing argument gets a one-word review from a man holding a Pop-Tart." → Correct: "One word. Delivered by Pop-Tart guy."
+- Too long: "The most-searched woman on the internet came over to enter a guacamole contest." → Correct: "The internet's most searched woman. Making guac."
 
 ### The test
 
@@ -415,8 +423,9 @@ render argues for it.
 
 Static grid-thumbnail image and upload text, generated stage-4-adjacent per clip — not an automated upload. 2026 platform research finding that drives this design: YouTube Shorts' custom-thumbnail feature (July 2026) is YPP + Studio-desktop only, and the Data API's `thumbnails.set` is undocumented/unreliable for Shorts. So this produces an asset the human copies in at manual upload time, same as the video file itself — never a publishing call.
 
-- `thumbnail_text`, `suggested_title`, `suggested_hashtags` are added to the SAME `select`/`select_clip` schema and LLM call that already produces `caption_title`/`vo_script` — context is already loaded, no second call. `thumbnail_text` must read as genuinely different from `caption_title`: punchier, more outrageous, meant to compete for a click with zero context, ideally a striking quoted line of dialogue. None of the three can drop an otherwise-good segment on their own — a blank or malformed value only warns and keeps the segment, same posture as an over-long `vo_script` getting nulled rather than sinking the clip.
-- `clipper thumbnail VIDEO_ID [--n N] [--force]` (standalone CLI command, `src/clipper/thumbnail.py`) generates `thumbnail_{n}.jpg` (1080x1920) and `metadata_{n}.json` from an already-selected segment. **Not wired into `clip`/`render` by default yet** — built and tested standalone first, on purpose.
+- `thumbnail_text`, `suggested_title`, `suggested_hashtags`, `suggested_description` are added to the SAME `select`/`select_clip` schema and LLM call that already produces `caption_title`/`vo_script` — context is already loaded, no second call. `thumbnail_text` must read as genuinely different from `caption_title`: punchier, more outrageous, meant to compete for a click with zero context, ideally a striking quoted line of dialogue. `suggested_description` is 2-4 sentences for the upload form's description field: what's happening, a credit line naming the source channel (this project reuses someone else's clip; crediting the stream it came from is not optional), then the first 3 `suggested_hashtags` repeated at the end — platforms surface a description's first 3 hashtags above the title itself, so those three have to be worth surfacing. None of the four can drop an otherwise-good segment on their own — a blank or malformed value only warns and keeps the segment, same posture as an over-long `vo_script` getting nulled rather than sinking the clip.
+- `clipper thumbnail VIDEO_ID [--n N] [--force]` (standalone CLI command, `src/clipper/thumbnail.py`) generates `thumbnail_{n}.jpg` (1080x1920), `metadata_{n}.json`, and `upload_{n}.txt` from an already-selected segment. Runs automatically as `clip`'s last step (see the Stage contract table above); the standalone command stays available for regenerating without re-rendering — e.g. rejecting a thumbnail in review but keeping the video.
+- **`upload_{n}.txt` exists because `metadata_{n}.json` isn't directly usable at upload time.** JSON's quoting and braces aren't what you want selected when pasting into YouTube Studio's title/description fields. `write_metadata()` writes both from the same call — the JSON for tooling, a plain-text `Title:` / `Description:` rendering (no quotes, no JSON syntax) for a human to select-all and paste. A `metadata_{n}.json` written before this file existed gets it backfilled automatically on the next `write_metadata()` call, without needing `--force` — same posture as `vo_words.json`'s own backfill in narrate.py.
 - Frame selection prefers layer 3's own already-computed judgment (`visual_judge.json`'s `best_frame_timestamp` — the vision model that already looked at several frames to decide pass/reject also names which one is most worth using as a thumbnail, extending that same call's schema rather than paying for a second one) when it falls inside the final segment's own `[start, end]`. Falls back to a cheap pixel-stats scan (reusing `clipper.frames.edge_density`, same proxy visual_gate's layer 1 uses) when layer 3 never ran (the long-form YouTube path) or its pick got trimmed out of range by `select_clip`. For `facecam_split`, the fallback scores only the facecam panel's own source region, not the whole frame.
 - Text and its background scrim stay inside a centered 1080x1080 safe square (Reels crops the cover to 4:5/3:4, TikTok's grid does its own crop) and clear of the `facecam_split` panel seam at y≈960. Text color is the tone's own caption highlight color (`styles.yaml`) for visual consistency with the video's own captions.
 - **Emoji confirmed broken, stripped before rendering.** `drawtext` + the vendored Montserrat font renders emoji as tofu boxes, not the glyph — confirmed against a real render, not assumed. Montserrat has no emoji coverage and `drawtext` has no font-fallback mechanism (this project never relies on fontconfig substitution for exactly this kind of silent breakage). `thumbnail_text` may still carry up to 2 emoji per the prompt rules — they stay in `metadata.json` verbatim for a human assembling a thumbnail by hand elsewhere, but the auto-rendered overlay strips them first.

@@ -38,13 +38,17 @@ another. Subcommands:
       render without VO" rule.
 
   clipper thumbnail VIDEO_ID [--n N] [--force]
-      generates work/{video_id}/thumbnail_{n}.jpg and metadata_{n}.json from
-      an already-selected segment (thumbnail_text/suggested_title/
-      suggested_hashtags — added to segments.json's schema alongside
-      caption_title/vo_script, CLAUDE.md thumbnail generation step). `clip`
-      now runs this automatically as its last step; this standalone command
-      stays for regenerating a thumbnail alone — e.g. rejecting a thumbnail
-      in review but keeping the video — without re-rendering out_{n}.mp4.
+      generates work/{video_id}/thumbnail_{n}.jpg, metadata_{n}.json, and
+      upload_{n}.txt from an already-selected segment (thumbnail_text/
+      suggested_title/suggested_hashtags/suggested_description — added to
+      segments.json's schema alongside caption_title/vo_script, CLAUDE.md
+      thumbnail generation step). metadata_{n}.json is structured for
+      tooling; upload_{n}.txt is the same title/description as plain text —
+      no quotes, no JSON syntax — for pasting straight into an upload form.
+      `clip` now runs this automatically as its last step; this standalone
+      command stays for regenerating a thumbnail alone — e.g. rejecting a
+      thumbnail in review but keeping the video — without re-rendering
+      out_{n}.mp4.
       Reads work/{video_id}/segments.json for segment `n`'s
       start/end/tone/thumbnail_text/punchline_at; reuses Layer 3's own
       best_frame_timestamp (clipper.visual_judge) when available and it
@@ -353,8 +357,9 @@ def main(argv: list[str] | None = None) -> None:
 
     thumbnail_p = sub.add_parser(
         "thumbnail",
-        help="generate thumbnail_{n}.jpg + metadata_{n}.json for an already-selected segment "
-        "(standalone — not yet wired into clip/render by default)",
+        help="generate thumbnail_{n}.jpg + metadata_{n}.json + upload_{n}.txt for an "
+        "already-selected segment (runs automatically as clip's last step; standalone here "
+        "for regenerating without re-rendering)",
     )
     thumbnail_p.add_argument("video_id", help="video id of an already-selected video")
     thumbnail_p.add_argument("--n", type=int, default=0, help="clip index within the video")
@@ -589,9 +594,10 @@ def main(argv: list[str] | None = None) -> None:
             else None,
             force=args.force,
         )
-        meta_path = write_metadata(args.video_id, args.n, seg, force=args.force)
+        meta_path, upload_txt_path = write_metadata(args.video_id, args.n, seg, force=args.force)
         print(thumb_path)
         print(meta_path)
+        print(upload_txt_path)
 
     elif args.command == "review":
         from .review import review

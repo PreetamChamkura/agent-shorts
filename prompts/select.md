@@ -38,7 +38,15 @@ Before writing, ask two things: what would the viewer need to know to find this 
 
 One beat, not two. If the line joins two separate observations — with "and," "but," a comma, or a full stop between two sentences — pick the stronger one and cut the rest — a single sharp claim beats two half-claims stitched together. "The most searched woman on the internet is standing in his kitchen, and the entire stream has to sit through a debate about dip" is two jokes fighting each other (who she is / what's mundanely happening instead); it should have been one or the other, not both. Splitting them into two sentences is the same failure wearing different punctuation: "Doc's ban went unexplained for four years. Shroud stopped answering him on day one." is two claims, not one line. Read it out loud — a natural pause where you'd take a breath mid-thought means it's two beats trying to be one.
 
-Target 8-20 words. The persona's 35-word ceiling is a hard limit, not something to write toward — shorter is the default, and longer is earned only when the one beat genuinely needs the room, never to fit a second observation in.
+Target 2-6 words — the same punchy register as `thumbnail_text` below, not narration. 8-20 words is an outer allowance for a beat that genuinely can't compress further, not the normal target it used to be; the persona's 35-word ceiling is still a hard limit, never something to write toward. Shorter is better at every one of those tiers, not just acceptable.
+
+A full grammatical sentence is not required, and chasing one usually fights brevity directly. Fragments are fine — dropped articles, dropped verbs, a clause with no subject — as long as the angle from the paragraph above still lands. Cutting words is not the same job as cutting the point: what goes is the connective tissue around the angle (articles, hedges, restating what's visible), never the specific thing that makes the moment land.
+
+Too long vs. the target register — same fact, half the words:
+- "A stand-up set's closing argument gets a one-word review from a man holding a Pop-Tart." → "One word. Delivered by Pop-Tart guy."
+- "The most-searched woman on the internet came over to enter a guacamole contest." → "The internet's most searched woman. Making guac."
+
+This compounds with the one-beat rule above, it doesn't replace it — a short line can still smuggle in two claims.
 
 If there is nothing — the clip is entirely self-explanatory — set `vo_script` to null rather than writing filler. A clip with no VO is fine. A clip with an empty VO is not.
 
@@ -134,6 +142,7 @@ Write these from the same read of the segment — they serve a different job tha
 - `thumbnail_text`: the words that go ON the static grid thumbnail image, not in the video. This has to work with zero context, competing for a click in a grid of other thumbnails — punchier and more outrageous than `caption_title`, which only has to make sense once someone's already watching. 3-6 words. Prefer a striking line of dialogue quoted verbatim from the transcript; if nothing in the transcript is quotable, write a short reaction phrase instead — never a generic hype phrase ("YOU WON'T BELIEVE THIS", "WAIT FOR IT"). 0-2 emoji max, used as an accent, not decoration. Must read as a genuinely different line from `caption_title`, not the same words trimmed differently. **If you put quote marks around it, it must be an exact contiguous span of words from the transcript — same spelling, same words, no substitutions ("med school" is not "medical school", "he's not" is not "he isn't"), even for a single word.** Light edits for readability are not allowed inside quote marks; a real transcript quote can be trimmed shorter but never reworded. If the line isn't an exact transcript span, don't wrap it in quote marks — write it as a plain reaction phrase instead. This isn't just style: this clip's actual downloaded frame gets picked by finding where the quoted words are spoken, so a quote that isn't real breaks that mechanism silently and the thumbnail image loses its connection to the words on it
 - `suggested_title`: the title a human would paste in at upload time. It creates curiosity, it does not summarize — if the title fully explains the clip, the viewer already knows what happens and has no reason to watch it. Withhold the specific payoff: reference that something happened without revealing what it was. "Sodapoppin had no idea who was in his kitchen" works; "Mia Khalifa is in Sodapoppin's kitchen" does not — that second version answers the question the title should be creating. Still has to be accurate: never imply something that doesn't happen in the clip. This is curiosity, not clickbait — no "you won't believe," no fabricated stakes, no promising a payoff the clip doesn't deliver, just withholding the one specific detail that would let someone skip watching. One beat, not two — if the title joins two separate claims with "and," a comma, or a full stop, cut to the stronger one; "Soda's house had a guacamole cook-off and one competitor stole the whole stream" is two claims stapled together, not one sharp line. Prefer under ~10-12 words, one clause. Front-load the hook into the first ~50-80 characters — that window is a formatting constraint for where feeds cut off, not a length to fill; a short title well under it beats one that stretches to meet it
 - `suggested_hashtags`: 3-5 tags specific to this clip's actual content (the game, the person, the situation) — never generic filler like #fyp, #viral, or #shorts on their own
+- `suggested_description`: 2-4 sentences for the upload form's own description field — not a restatement of `suggested_title` in longer form. What's actually happening in the clip (plain, accurate — this can say more than the title withholds, since a viewer reading the description has already clicked), then a credit line naming the source channel from the Source section above (this project reuses someone else's clip; crediting whose stream it's from is not optional). Close by repeating the first 3 tags from `suggested_hashtags` — platforms surface a description's first 3 hashtags above the title itself, so those first 3 have to be worth surfacing, not filler ones pushed to the front just to fill this requirement
 
 ## Output
 
@@ -157,7 +166,8 @@ Return only a JSON object. No prose, no markdown fences, no preamble.
       "confidence": 0.82,
       "thumbnail_text": "\"I DIDN'T EVEN SEE HIM\"",
       "suggested_title": "He ruled this out three weeks before it happened",
-      "suggested_hashtags": ["#valorant", "#clutch", "#shroud"]
+      "suggested_hashtags": ["#valorant", "#clutch", "#shroud"],
+      "suggested_description": "Shroud calls the exact outcome live on stream, weeks before it actually happens. Clip via Shroud on Twitch. #valorant #clutch #shroud"
     }
   ]
 }
@@ -176,5 +186,6 @@ Field rules:
 - `thumbnail_text`: 3-6 words, must differ genuinely from `caption_title` — see "Thumbnail and upload metadata" above. Quote marks mean an exact transcript span, word for word — never use them around a paraphrase
 - `suggested_title`: creates curiosity, withholds the specific payoff, still accurate — never a summary that answers its own question. One beat, not two — under ~10-12 words when possible. Front-load the hook into the first ~50-80 characters
 - `suggested_hashtags`: 3-5 specific tags, never generic filler alone
+- `suggested_description`: 2-4 sentences — what happens in the clip, a credit line naming the source channel, then the first 3 `suggested_hashtags` repeated at the end
 
 Return {"segments": []} if nothing qualifies. That is a correct and expected answer for most windows.

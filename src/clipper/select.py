@@ -39,12 +39,15 @@ doesn't belong to the chosen mode rather than dropping the segment.
 Also produces the static thumbnail + upload-metadata fields (CLAUDE.md
 thumbnail + metadata generation step) in this SAME call, not a separate LLM
 call — context is already loaded, so `thumbnail_text` (a punchier, distinct
-line for the static grid image), `suggested_title`, and `suggested_hashtags`
-ride along with caption_title/vo_script. Thin on validation by design: none
-of the three can drop an otherwise-good segment, only warn (see
-validate_segment) — a real clip shouldn't be discarded over a marketing
-field, mirroring how an over-long vo_script gets nulled rather than sinking
-the segment. Consumed by clipper.thumbnail (stage 4's thumbnail/metadata
+line for the static grid image), `suggested_title`, `suggested_hashtags`, and
+`suggested_description` (a short credit-and-hashtags blurb for the upload
+form's own description field, repeating the first few hashtags since that's
+what surfaces above the title on-platform) ride along with
+caption_title/vo_script. Thin on validation by design: none of the four can
+drop an otherwise-good segment, only warn (see validate_segment) — a real
+clip shouldn't be discarded over a marketing field, mirroring how an
+over-long vo_script gets nulled rather than sinking the segment. Consumed by
+clipper.thumbnail (stage 4's thumbnail/metadata
 generation), not by render() itself.
 """
 
@@ -73,7 +76,9 @@ MARKER_INTERVAL = 15.0  # [h:mm:ss] markers, per prompts/select.md
 MIN_DURATION = 18.0
 MAX_DURATION = 58.0
 CONFIDENCE_FLOOR = 0.7
-VO_MAX_WORDS = 35  # CLAUDE.md narrator rules: 8-20 words is the target, 35 is the hard ceiling
+VO_MAX_WORDS = 35  # CLAUDE.md narrator rules: 2-6 words is the target, 8-20 an outer
+# allowance for a beat that can't compress further, 35 the hard ceiling — unchanged
+# here since this constant has only ever been the hard-reject cutoff, not the target
 
 # Narration modes (CLAUDE.md "Narration modes"). `vo_placement` is the mode
 # selector, and it is the AUTHORITY when the model contradicts itself: the two
@@ -96,6 +101,13 @@ CAPTION_MAX_WORDS = VO_MAX_WORDS
 # slightly wrong on length, the same reasoning VO's word ceiling uses.
 THUMBNAIL_TEXT_MIN_WORDS = 3
 THUMBNAIL_TEXT_MAX_WORDS = 6
+
+# suggested_description soft bounds (CLAUDE.md: "2-4 sentences"). Same
+# warn-and-keep posture as thumbnail_text's word count above — a sentence
+# count off by one is a reason to look at the field, not to drop a real
+# segment over a marketing field.
+DESCRIPTION_MIN_SENTENCES = 2
+DESCRIPTION_MAX_SENTENCES = 4
 
 # How far punchline_at may sit outside the quoted payoff's own real
 # transcript span before it's treated as drifted rather than ordinary
@@ -160,6 +172,7 @@ _RESPONSE_SCHEMA = {
                         "type": "array",
                         "items": {"type": "string"},
                     },
+                    "suggested_description": {"type": "string"},
                 },
                 "required": [
                     "start",
@@ -178,6 +191,7 @@ _RESPONSE_SCHEMA = {
                     "thumbnail_text",
                     "suggested_title",
                     "suggested_hashtags",
+                    "suggested_description",
                 ],
                 "additionalProperties": False,
             },
@@ -330,6 +344,15 @@ def _clean_line(value: object) -> str | None:
     if value is None:
         return None
     return str(value).strip() or None
+
+
+def _count_sentences(text: str) -> int:
+    """Rough sentence count for the soft `suggested_description` length
+    check — split on sentence-ending punctuation, drop empty fragments from
+    trailing punctuation or double spacing. Not meant to be exact (an
+    abbreviation or a decimal number would over-count), only enough to warn
+    when a description reads like one line or like a wall of text."""
+    return len([s for s in re.split(r"[.!?]+", text) if s.strip()])
 
 
 def resolve_narration(hook: str, raw: dict, placement: str) -> tuple[str | None, str | None]:
@@ -649,6 +672,27 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
             suggested_hashtags,
         )
 
+    suggested_description = str(raw.get("suggested_description", "")).strip()
+    if not suggested_description:
+        log.warning("select: %r has no suggested_description", hook)
+    else:
+        sentence_count = _count_sentences(suggested_description)
+        if not (DESCRIPTION_MIN_SENTENCES <= sentence_count <= DESCRIPTION_MAX_SENTENCES):
+            log.warning(
+                "select: %r suggested_description is %d sentence(s) (want %d-%d) — keeping as-is",
+                hook,
+                sentence_count,
+                DESCRIPTION_MIN_SENTENCES,
+                DESCRIPTION_MAX_SENTENCES,
+            )
+        if suggested_hashtags and not any(h in suggested_description for h in suggested_hashtags):
+            log.warning(
+                "select: %r suggested_description doesn't repeat any of suggested_hashtags %r "
+                "— keeping as-is",
+                hook,
+                suggested_hashtags,
+            )
+
     return {
         "start": start,
         "end": end,
@@ -666,6 +710,7 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
         "thumbnail_text": thumbnail_text,
         "suggested_title": suggested_title,
         "suggested_hashtags": suggested_hashtags,
+        "suggested_description": suggested_description,
     }
 
 
