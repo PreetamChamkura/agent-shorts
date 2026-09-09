@@ -18,6 +18,15 @@ living in a separate drawtext pass. It gets its own [V4+ Styles] entry derived
 from the SAME tone block (`held_caption_style`), so it stays a tone lookup and
 never a second styling system — see that function for exactly which properties
 are inherited and which are deliberately overridden.
+
+`group_words` can also flush a karaoke group early on estimated rendered
+width, not just word count — confirmed necessary from a real render:
+`awkward`'s fixed 5-word groups overflowed off both edges of the frame on a
+real transcript line, since WrapStyle 2 means libass never wraps on its own
+and the progressive reveal can't insert a mid-group break. `build_ass` always
+passes the resolved style's real margins/fontsize through, so every tone is
+protected, not just `awkward` — a group only ever shrinks below its
+configured `group_size`, never grows past it.
 """
 
 from __future__ import annotations
@@ -28,6 +37,25 @@ from typing import TypedDict
 # Sentence-ending punctuation triggers an early phrase-group break (CLAUDE.md:
 # "Break phrase groups on sentence-ending punctuation ... even when short").
 _SENTENCE_END = (".", "!", "?", "…")
+
+# Average glyph width for Montserrat ExtraBold UPPERCASE, as a fraction of
+# fontsize — MEASURED, not guessed: rendered 9 real transcript phrases (13-39
+# chars, the actual overflow case among them) through the real `ass=` filter
+# this module targets, at the real karaoke fontsize 104, then scanned the
+# output pixels for the rightmost lit column. Real factors came back
+# 0.446-0.549, average ~0.50. NOT clipper.thumbnail's own
+# _AVG_CHAR_WIDTH_FACTOR (0.62) — that constant is for `drawtext`, a
+# different rasterizer with measurably different metrics (confirmed: the
+# same phrases measured 25-30% wider through drawtext than through the real
+# ass/libass path), at a different fontsize (88, not 104). Reusing it here
+# was tried first and immediately over-split an existing 3-word test
+# fixture that the real pipeline renders with room to spare — a case of the
+# codebase's own "verify against real output" rule catching a bad shortcut
+# before it shipped. Set above the measured max (0.549), not the average, to
+# still err toward splitting a group early rather than overflowing the frame.
+_AVG_UPPERCASE_CHAR_WIDTH_FACTOR = 0.58
+
+PLAY_RES_X = 1080  # matches the [Script Info] PlayResX below
 
 
 class Word(TypedDict):
@@ -69,23 +97,70 @@ def format_ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def group_words(words: Sequence[Word], group_size: int) -> list[list[Word]]:
+def group_words(
+    words: Sequence[Word],
+    group_size: int,
+    *,
+    max_width_px: float | None = None,
+    fontsize: float | None = None,
+    uppercase: bool = True,
+) -> list[list[Word]]:
     """Chunk words into phrase groups.
 
     Flush a group when it reaches ``group_size`` OR when a word ends a sentence
     (trailing . ! ? …), whichever comes first.
+
+    ``max_width_px``/``fontsize`` opt into a THIRD, real reason to flush early:
+    the group's estimated rendered width would exceed the frame's usable width.
+    Real bug found from a real render: `awkward`'s 5-word groups (styles.yaml)
+    are a fixed word COUNT with no ceiling on rendered width, and five real
+    transcript words ("forms from the anthropological approach") rendered at
+    104px overflowed off both edges of the frame entirely — WrapStyle 2 means
+    libass never wraps on its own, only on an explicit break, and this
+    progressive-reveal design can't insert one mid-group without changing which
+    words are on screen at each step. Both args must be given together (no
+    default width/fontsize — a hardcoded number here would silently stop
+    tracking styles.yaml's real margins); passing neither preserves the
+    original count-only behavior exactly, including every existing group_size
+    caller and test. `group_size` stays the target; this only ever makes a
+    group SMALLER, never larger — a short group of long words still fits,
+    exactly like the existing sentence-end break.
     """
     if group_size < 1:
         raise ValueError(f"group_size must be >= 1, got {group_size}")
+    if (max_width_px is None) != (fontsize is None):
+        raise ValueError("group_words: max_width_px and fontsize must be given together")
+
+    max_group_chars = None
+    if max_width_px is not None and fontsize is not None:
+        max_group_chars = max(1, int(max_width_px / (fontsize * _AVG_UPPERCASE_CHAR_WIDTH_FACTOR)))
 
     groups: list[list[Word]] = []
     current: list[Word] = []
+    current_chars = 0
     for w in words:
+        token = w["word"].strip()
+        token_len = len(token.upper() if uppercase else token)
+        # +1 for the joining space this word would add to the group's line —
+        # not charged on the first word of a new group, which has none.
+        added_chars = token_len + (1 if current else 0)
+        if (
+            max_group_chars is not None
+            and current
+            and current_chars + added_chars > max_group_chars
+        ):
+            groups.append(current)
+            current = []
+            current_chars = 0
+            added_chars = token_len
+
         current.append(w)
+        current_chars += added_chars
         ends_sentence = w["word"].rstrip().endswith(_SENTENCE_END)
         if len(current) >= group_size or ends_sentence:
             groups.append(current)
             current = []
+            current_chars = 0
     if current:
         groups.append(current)
     return groups
@@ -254,7 +329,7 @@ def build_ass(
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
-        "PlayResX: 1080\n"
+        f"PlayResX: {PLAY_RES_X}\n"
         "PlayResY: 1920\n"
         "WrapStyle: 2\n"
         "\n"
@@ -279,7 +354,14 @@ def build_ass(
             f"Dialogue: 0,{format_ass_time(held['start'])},{format_ass_time(held['end'])},"
             f"{HELD_STYLE_NAME},,0,0,0,,{wrap_held_text(held['text'].strip())}"
         )
-    for group in group_words(words, group_size):
+    usable_width = PLAY_RES_X - int(st["marginl"]) - int(st["marginr"])
+    for group in group_words(
+        words,
+        group_size,
+        max_width_px=usable_width,
+        fontsize=float(st["fontsize"]),
+        uppercase=uppercase,
+    ):
         for i, w in enumerate(group):
             # Keep spoken-so-far words visible: this word's line runs until
             # the next word starts; the last word runs to its own end.

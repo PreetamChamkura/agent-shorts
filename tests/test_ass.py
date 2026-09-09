@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from clipper.ass import (
     DEFAULT_STYLE,
     HELD_FONTSIZE,
@@ -59,6 +61,112 @@ def test_group_words_rejects_bad_size():
         raise AssertionError("expected ValueError for group_size 0")
 
 
+# --- width-based early split (real bug: awkward's 5-word groups overflowed) --
+
+
+def _long_words():
+    # The real transcript group that overflowed off both frame edges on a
+    # real render before this fix — see clipper.ass module docstring.
+    return [
+        {"word": "forms", "start": 0.0, "end": 0.5},
+        {"word": "from", "start": 0.5, "end": 0.9},
+        {"word": "the", "start": 0.9, "end": 1.1},
+        {"word": "anthropological", "start": 1.1, "end": 2.0},
+        {"word": "approach.", "start": 2.0, "end": 2.6},
+    ]
+
+
+# Default style: fontsize 104, marginl/marginr 70/70 -> 940px usable width.
+_DEFAULT_USABLE_WIDTH = 1080 - 70 - 70
+_DEFAULT_FONTSIZE = 104.0
+
+
+def test_group_words_requires_width_and_fontsize_together():
+    with pytest.raises(ValueError, match="together"):
+        group_words(_long_words(), 5, max_width_px=940)
+    with pytest.raises(ValueError, match="together"):
+        group_words(_long_words(), 5, fontsize=104)
+
+
+def test_group_words_without_width_args_is_unchanged():
+    # No max_width_px/fontsize -> pure count-based grouping, exactly as
+    # before this fix existed (every pre-existing caller and test).
+    groups = group_words(_long_words(), 5)
+    assert [len(g) for g in groups] == [5]
+
+
+def test_group_words_splits_early_when_the_group_would_overflow():
+    # The real overflow case: 5 words, group_size=5 (awkward's own config),
+    # at the real karaoke fontsize/margins. Must not stay a single group.
+    groups = group_words(
+        _long_words(), 5, max_width_px=_DEFAULT_USABLE_WIDTH, fontsize=_DEFAULT_FONTSIZE
+    )
+    assert len(groups) > 1
+    assert all(len(g) < 5 for g in groups)
+    # Still every word, still in order — a split, never a drop.
+    assert [w["word"] for g in groups for w in g] == [w["word"] for w in _long_words()]
+
+
+def test_group_words_width_split_never_exceeds_group_size():
+    # The width check can only make a group smaller than group_size, never
+    # larger — group_size is still the ceiling.
+    groups = group_words(
+        _long_words(), 5, max_width_px=_DEFAULT_USABLE_WIDTH, fontsize=_DEFAULT_FONTSIZE
+    )
+    assert all(1 <= len(g) <= 5 for g in groups)
+
+
+def test_group_words_short_words_are_unaffected_by_the_width_check():
+    # An ordinary short group must not be split just because the width check
+    # is switched on — only genuinely long groups should ever trigger it.
+    words = [
+        {"word": w, "start": i, "end": i + 0.3} for i, w in enumerate(["he", "had", "no", "idea"])
+    ]
+    groups = group_words(
+        words, 4, max_width_px=_DEFAULT_USABLE_WIDTH, fontsize=_DEFAULT_FONTSIZE
+    )
+    assert len(groups) == 1
+    assert len(groups[0]) == 4
+
+
+def test_group_words_width_check_still_honors_sentence_end():
+    # Sentence-end punctuation and the width check are independent triggers;
+    # a short sentence-ending group must still flush on the period alone.
+    words = [
+        {"word": "so", "start": 0, "end": 0.4},
+        {"word": "yeah.", "start": 0.5, "end": 0.9},
+        {"word": "then", "start": 1.0, "end": 1.4},
+    ]
+    groups = group_words(
+        words, 5, max_width_px=_DEFAULT_USABLE_WIDTH, fontsize=_DEFAULT_FONTSIZE
+    )
+    assert [[w["word"] for w in g] for g in groups] == [["so", "yeah."], ["then"]]
+
+
+def test_build_ass_awkward_style_splits_the_real_overflow_group():
+    # Integration: build_ass always resolves the real style's margins/
+    # fontsize and passes them through — awkward's own styles.yaml config
+    # (group_size=5, no margin override) is exactly the real bug's shape.
+    out = build_ass(_long_words(), 5, {"primary": "&H00FFFFFF"})
+    # 5 words, one Dialogue line per word as always — but the LAST line
+    # (all 5 words spoken) must not contain all 5 words' plain text if the
+    # group was split; check the final line's text has fewer than 5 tokens.
+    dialogues = [ln for ln in out.splitlines() if ln.startswith("Dialogue:")]
+    last_text = dialogues[-1].split(",,", 1)[1]
+    bare = re.sub(r"\{[^}]*\}", "", last_text)
+    assert len(bare.split()) < 5
+
+
+def test_build_ass_without_width_info_would_have_overflowed_regression():
+    # Documents the actual bug this fix closes: forcing the OLD, count-only
+    # behavior (bypassing build_ass's own width resolution) on the same real
+    # words produces one ungrouped 5-word line — the confirmed-overflowing
+    # shape from the real render before this fix.
+    groups = group_words(_long_words(), 5)
+    assert len(groups) == 1
+    assert len(groups[0]) == 5
+
+
 def _words():
     return [
         {"word": "he", "start": 0.0, "end": 0.30},
@@ -109,33 +217,40 @@ def test_build_ass_word_not_visible_before_its_own_start():
     # Regression: a group's later words must not render — not even
     # unhighlighted — before their own spoken time. A real gap between
     # words (natural speech) used to leave them sitting on screen early.
+    #
+    # Deliberately short words: this test is about the visibility-timing
+    # invariant, not width-based splitting (see the "FORMS FROM THE
+    # ANTHROPOLOGICAL APPROACH" tests below) — long enough words at
+    # group_size 3 can now legitimately split the group early, which would
+    # make this test about two things at once.
     group = [
-        {"word": "Hey,", "start": 0.0, "end": 0.36},
-        {"word": "what's", "start": 3.54, "end": 3.60},
-        {"word": "going", "start": 3.60, "end": 3.72},
+        {"word": "Hi,", "start": 0.0, "end": 0.36},
+        {"word": "ok", "start": 3.54, "end": 3.60},
+        {"word": "now", "start": 3.60, "end": 3.72},
     ]
     out = build_ass(group, 3)
     dialogues = [ln for ln in out.splitlines() if ln.startswith("Dialogue:")]
+    assert len(dialogues) == 3  # confirms no width-based split fired here
 
-    # First line spans the whole 3.54s gap before "what's" is spoken —
-    # neither later word may appear in its text at all.
+    # First line spans the whole 3.54s gap before "ok" is spoken — neither
+    # later word may appear in its text at all.
     first = dialogues[0]
     assert ",0:00:00.00,0:00:03.54," in first
-    assert "WHAT'S" not in first
-    assert "GOING" not in first
-    assert "HEY," in first
+    assert "OK" not in first
+    assert "NOW" not in first
+    assert "HI," in first
 
-    # Second line begins exactly when "what's" is spoken, and now shows
-    # both words spoken so far, but not the third.
+    # Second line begins exactly when "ok" is spoken, and now shows both
+    # words spoken so far, but not the third.
     second = dialogues[1]
     assert ",0:00:03.54,0:00:03.60," in second
-    assert "HEY," in second
-    assert "WHAT'S" in second
-    assert "GOING" not in second
+    assert "HI," in second
+    assert "OK" in second
+    assert "NOW" not in second
 
     # Third line: all three words now spoken, all visible.
     third = dialogues[2]
-    assert "HEY," in third and "WHAT'S" in third and "GOING" in third
+    assert "HI," in third and "OK" in third and "NOW" in third
 
 
 def test_build_ass_accumulates_progressively_for_larger_groups():

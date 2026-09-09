@@ -367,11 +367,27 @@ inherited). Deliberate overrides, each load-bearing:
   colour means "this word is being said right now" everywhere else in the
   system, and reusing it here would collide semantically.
 - **Wrapped explicitly with `\N`.** `WrapStyle: 2` means libass does no word
-  wrapping of its own — only a hard break splits a line. The karaoke groups are
-  2-5 words and short enough that this has never surfaced; an 8-20 word held
-  line is not, so `clipper.ass.wrap_held_text` wraps deterministically instead
-  of hoping the renderer does. (Whether the 5-word `awkward` groups also overrun
-  at 104px is a separate, untested question — not touched here.)
+  wrapping of its own — only a hard break splits a line. A karaoke group can't
+  use the same `\N` fix: its text grows word-by-word as the line is spoken
+  (`clipper.ass.build_ass`'s progressive reveal), so a break computed from the
+  final group would land wrong for every shorter prefix on the way there. Held
+  captions don't have that constraint — the whole line is static from the
+  first frame — so `clipper.ass.wrap_held_text` wraps it deterministically
+  instead of hoping the renderer does.
+
+  **This DID surface for karaoke groups, confirmed on a real render**: `awkward`'s
+  fixed 5-word groups (styles.yaml) overflowed off both edges of the frame on
+  a real transcript line ("forms from the anthropological approach", 39
+  chars) — `group_size` was a word COUNT with no ceiling on rendered width.
+  Fixed differently from the held caption, because it had to be:
+  `clipper.ass.group_words` now also flushes a group early once its estimated
+  rendered width (a real-measured px-per-character factor for this font/size,
+  see the constant's own comment — NOT the same constant `clipper.thumbnail`
+  uses, which is a different rasterizer at a different size) would exceed the
+  resolved style's real usable width. `group_size` in styles.yaml stays the
+  target and the upper bound; this only ever makes a group smaller, protecting
+  every tone automatically, not just `awkward`. Confirmed fixed on the same
+  real overflowing line via a real render.
 
 **Hold window is derived from the text, not from the model.** From the clip's
 first frame for `words * 0.4s + 1.0s`, clamped to 2.5-8.0s, then it clears —
