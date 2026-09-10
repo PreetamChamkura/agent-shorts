@@ -89,6 +89,19 @@ MARKER_INTERVAL = 15.0  # [h:mm:ss] markers, per prompts/select.md
 MIN_DURATION = 18.0
 MAX_DURATION = 58.0
 CONFIDENCE_FLOOR = 0.7
+
+# Real finding from a real investigation (CLAUDE.md Known issues): a clip
+# ("Nightmare dungeons") that flipped accept/reject across effort levels in
+# an eval sweep turned out to have been accepted at confidence=0.71 in the
+# first place — one hundredth above this hard floor. Not a model or effort
+# defect; CONFIDENCE_FLOOR is a binary cutoff, so a case that close to it is
+# a near-coin-flip by construction, regardless of what decided it. This
+# doesn't fix that — it makes it visible: logged whenever confidence lands
+# within this margin of the floor, on either side, so how often the
+# selector is making a genuinely marginal call stops being invisible. If
+# that turns out to be common, that's grounds to revisit the floor itself
+# later — not a per-instance fix.
+CONFIDENCE_BORDERLINE_MARGIN = 0.03
 VO_MAX_WORDS = 35  # CLAUDE.md narrator rules: 2-6 words is the target, 8-20 an outer
 # allowance for a beat that can't compress further, 35 the hard ceiling — unchanged
 # here since this constant has only ever been the hard-reject cutoff, not the target
@@ -608,6 +621,16 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
     except (KeyError, TypeError, ValueError) as exc:
         log.info("select: dropped %r — unusable numeric field: %s", hook, exc)
         return None
+
+    if abs(confidence - CONFIDENCE_FLOOR) <= CONFIDENCE_BORDERLINE_MARGIN:
+        log.info(
+            "select: %r confidence %.2f is within %.2f of the %.2f floor — a near-coin-flip "
+            "call, accepted or not",
+            hook,
+            confidence,
+            CONFIDENCE_BORDERLINE_MARGIN,
+            CONFIDENCE_FLOOR,
+        )
 
     if confidence < CONFIDENCE_FLOOR:
         log.info(

@@ -397,6 +397,42 @@ def test_validate_segment_drops_low_confidence():
     assert validate_segment(_raw(confidence=0.5), _words(60)) is None
 
 
+# --- confidence borderline visibility (real finding: an accepted segment at
+# confidence=0.71, one hundredth above CONFIDENCE_FLOOR, flipped accept/reject
+# across effort levels in a real eval sweep — not a defect, but genuinely
+# invisible before this) ------------------------------------------------
+
+
+def test_validate_segment_flags_borderline_confidence_when_accepted(caplog):
+    caplog.set_level(logging.INFO)
+    seg = validate_segment(_raw(confidence=0.71), _words(60))
+    assert seg is not None
+    assert "near-coin-flip" in caplog.text
+    assert "0.71" in caplog.text
+
+
+def test_validate_segment_flags_borderline_confidence_when_dropped(caplog):
+    caplog.set_level(logging.INFO)
+    seg = validate_segment(_raw(confidence=0.69), _words(60))
+    assert seg is None
+    assert "near-coin-flip" in caplog.text
+    assert "0.69" in caplog.text
+
+
+def test_validate_segment_does_not_flag_a_comfortable_confidence(caplog):
+    caplog.set_level(logging.INFO)
+    seg = validate_segment(_raw(confidence=0.9), _words(60))
+    assert seg is not None
+    assert "near-coin-flip" not in caplog.text
+
+
+def test_validate_segment_does_not_flag_a_comfortably_dropped_confidence(caplog):
+    caplog.set_level(logging.INFO)
+    seg = validate_segment(_raw(confidence=0.5), _words(60))
+    assert seg is None
+    assert "near-coin-flip" not in caplog.text
+
+
 def test_validate_segment_drops_out_of_range_duration():
     # 10 -> 20 is only 10s, under the 18s floor
     assert validate_segment(_raw(end=20.0, punchline_at=19.0), _words(60)) is None
