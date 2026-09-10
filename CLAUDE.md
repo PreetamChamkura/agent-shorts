@@ -139,7 +139,7 @@ This works with the rules below, not instead of them — still no hype, still no
 
 - 2-6 words is the practical target — the same punchy register as `thumbnail_text`, not narration. 8-20 words is now an outer allowance for a beat that genuinely can't compress further, not the normal target it used to be; 35 stays the hard ceiling, never something to write toward. Shorter is better at every tier, not just acceptable — a line has repeatedly drifted toward the upper end by default, and that's the wrong direction whether the upper end is 6, 20, or 35
 - A full grammatical sentence is not required, and chasing one usually fights brevity directly. Fragments are fine — dropped articles, dropped verbs, a clause with no subject — as long as the angle still lands
-- Cutting words is not the same job as cutting the point. The angle named under "Find the angle before writing" above still has to survive the cut — what gets trimmed is the connective tissue around it (articles, hedges, restating what's visible), never the specific thing that makes the moment land
+- Cutting words is not the same job as cutting the point. The angle named under "Find the angle before writing" above still has to survive the cut — what gets trimmed is the connective tissue around it (articles, hedges, restating what's visible), never the specific thing that makes the moment land. Hitting 2-6 words by dropping the hook or the twist is a failure, not a success: a real example — "He's reading an accusation that turns out to be aimed at him" (has the twist: he doesn't know yet) got "compressed" to "He's reading this tweet for the first time, live on stream" (twist gone, now just describes the clip). The second one is shorter and worse. If a line can't reach 2-6 words with its hook intact, that IS the "genuinely can't compress" case the outer allowance exists for — take the 8-20 words and keep the hook. Never ship a short line that hit the count by gutting content
 - One beat, not two — this compounds with the word-count tightening above, it doesn't get replaced by it; a shorter line can still smuggle in two claims. If the line joins two separate observations — with "and," "but," a comma, or a full stop between two sentences — pick the stronger one and cut the rest — a single sharp claim beats two half-claims stitched together. ("The most searched woman on the internet is standing in his kitchen, and the entire stream has to sit through a debate about dip" is two jokes fighting each other — who she is, and what's mundanely happening instead — pick one)
 - Present tense
 - Never describe what is visibly happening. The viewer has eyes. Add what they can't see: context, history, stakes, what happened next
@@ -325,8 +325,10 @@ default is a spoken line, since the narrator is channel identity (see Narrator
 persona) and a caption is the exception taken for a stateable reason.
 
 `on_screen_caption` answers to every narrator-persona rule `vo_script` does —
-find the angle, one beat, 8-20 words, no hype. It is the same editorial line
-delivered to the eye instead of the ear, never a lower bar.
+find the angle, one beat, the 2-6 word target (see the persona Rules; not a
+looser 8-20 just because it's read instead of heard), no hype. It is the same
+editorial line delivered to the eye instead of the ear, never a lower bar and
+never a longer one.
 
 **A caption is never a fallback for failed VO.** A `tts_failed` or
 `vo_duration_exceeded` segment renders silent, not captioned: a line written to

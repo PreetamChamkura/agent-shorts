@@ -45,7 +45,7 @@ One beat, not two. If the line joins two separate observations — with "and," "
 
 Target 2-6 words — the same punchy register as `thumbnail_text` below, not narration. 8-20 words is an outer allowance for a beat that genuinely can't compress further, not the normal target it used to be; the persona's 35-word ceiling is still a hard limit, never something to write toward. Shorter is better at every one of those tiers, not just acceptable.
 
-A full grammatical sentence is not required, and chasing one usually fights brevity directly. Fragments are fine — dropped articles, dropped verbs, a clause with no subject — as long as the angle from the paragraph above still lands. Cutting words is not the same job as cutting the point: what goes is the connective tissue around the angle (articles, hedges, restating what's visible), never the specific thing that makes the moment land.
+A full grammatical sentence is not required, and chasing one usually fights brevity directly. Fragments are fine — dropped articles, dropped verbs, a clause with no subject — as long as the angle from the paragraph above still lands. Cutting words is not the same job as cutting the point: what goes is the connective tissue around the angle (articles, hedges, restating what's visible), never the specific thing that makes the moment land. Hitting 2-6 words by dropping the hook or the twist is a failure, not a success — "He's reading an accusation that turns out to be aimed at him" (has the twist: he doesn't know yet) is NOT improved by "compressing" it to "He's reading this tweet for the first time, live on stream" (twist gone, now just describes the clip; shorter and worse). If the line can't reach 2-6 words with its hook intact, that IS the "genuinely can't compress" case the 8-20 outer allowance exists for — take the room and keep the hook. Never output a short line that hit the count by gutting the angle.
 
 Too long vs. the target register — same fact, half the words:
 - "A stand-up set's closing argument gets a one-word review from a man holding a Pop-Tart." → "One word. Delivered by Pop-Tart guy."
@@ -125,10 +125,12 @@ not actually made the choice yet.
 ### Same bar, both modes
 
 `on_screen_caption` obeys every rule `vo_script` does: find the angle first, one
-beat not two, 8-20 words, present tense, never describing what is visible, no
-hype, no questions to the audience. A line that fails the bar is not rescued by
-being displayed instead of spoken. If there is nothing worth saying, both fields
-are null and the clip runs unframed — a correct answer, not a failure.
+beat not two, the 2-6 word target above (read instead of heard is not a reason
+to run longer — same target, not a looser 8-20), present tense, never
+describing what is visible, no hype, no questions to the audience. A line that
+fails the bar is not rescued by being displayed instead of spoken. If there is
+nothing worth saying, both fields are null and the clip runs unframed — a
+correct answer, not a failure.
 
 ## Tone
 
