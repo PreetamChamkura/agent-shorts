@@ -67,7 +67,16 @@ import logging
 import tempfile
 from pathlib import Path
 
-from .ass import HeldCaption, Word, build_ass, held_caption_duration
+from .ass import (
+    HELD_MARGIN_TOP,
+    HeldCaption,
+    Word,
+    build_ass,
+    held_band_marginv,
+    held_caption_duration,
+    held_caption_style,
+    wrap_held_text,
+)
 from .face_detect import find_face_region, is_small_corner_facecam
 from .ffmpeg import probe_duration, run_ffmpeg, run_ffprobe
 from .frames import mean_abs_diff, read_pgm_gray
@@ -216,6 +225,67 @@ def _tight_crop_video() -> str:
         f"[fg]scale={TIGHT_CROP_WIDTH}:-2,crop=1080:ih[fgs];"
         "[bgb][fgs]overlay=(W-w)/2:(H-h)/2[comp]"
     )
+
+
+_OUTPUT_H = 1920
+# Karaoke's lowest painted pixel, roughly, as a floor for the held caption's
+# upper band. `chaotic` sits its karaoke top-centred at MarginV 260 with
+# 2-word groups — worst case two 104px lines, so ~y520. Every other tone
+# runs karaoke middle-centred, which leaves the whole top of the frame free
+# for the held line, so HELD_MARGIN_TOP is floor enough there.
+_KARAOKE_BOTTOM_TOPTONE = 540
+HELD_BAND_GAP = 20  # px kept between the held block and the face / watermark
+
+
+def _face_output_band(face_region: dict | None, composition: str) -> tuple[float, float] | None:
+    """(top_y, bottom_y) of the detected face in the FINAL 1080x1920 frame,
+    for the blur-fill compositions (`tight_crop`, `blur_fill`) whose foreground
+    scale is a simple uniform resize plus a vertical centre offset. Returns
+    None when there's no face, or for panel compositions where the mapping
+    isn't this simple (facecam_split's held placement is left as-is — its
+    own panel seam is the constraint there, tracked separately)."""
+    if not face_region or composition not in ("tight_crop", "blur_fill"):
+        return None
+    src_w = float(face_region["frame_width"])
+    src_h = float(face_region["frame_height"])
+    if src_w <= 0 or src_h <= 0:
+        return None
+    scale = (TIGHT_CROP_WIDTH if composition == "tight_crop" else 1080) / src_w
+    scaled_h = src_h * scale
+    offset = (_OUTPUT_H - scaled_h) / 2.0
+    top = float(face_region["y"]) * scale + offset
+    bottom = (float(face_region["y"]) + float(face_region["h"])) * scale + offset
+    return max(0.0, top), min(float(_OUTPUT_H), bottom)
+
+
+def _face_aware_held_style(
+    style_overrides: dict, face_region: dict | None, composition: str, text: str
+) -> dict | None:
+    """A held-caption style whose band clears the subject's face, not just the
+    karaoke line. Returns None to fall back to the default placement
+    (`held_caption_style`) — no face known, panel composition, or no clear
+    band big enough either side of the face.
+    """
+    band = _face_output_band(face_region, composition)
+    if band is None:
+        return None
+    face_top, face_bottom = band
+    n_lines = len(wrap_held_text(text.strip()).split("\\N"))
+
+    karaoke_at_top = int(style_overrides.get("alignment", 5)) in (7, 8, 9)
+    upper_floor = _KARAOKE_BOTTOM_TOPTONE if karaoke_at_top else float(HELD_MARGIN_TOP)
+
+    # Prefer the gap above the face (below the karaoke); fall back to the gap
+    # between the face and the watermark. Whichever fits, top-anchored.
+    marginv = held_band_marginv(upper_floor, face_top - HELD_BAND_GAP, n_lines)
+    if marginv is None:
+        marginv = held_band_marginv(
+            face_bottom + HELD_BAND_GAP, float(WATERMARK_Y) - HELD_BAND_GAP, n_lines
+        )
+    if marginv is None:
+        return None
+
+    return {**held_caption_style(style_overrides), "alignment": 8, "marginv": marginv}
 
 
 def _split_screen_video() -> str:
@@ -687,13 +757,18 @@ def render(
     # — that's the whole reason this mode exists, so the clip's own captions
     # keep running underneath it in their own band (clipper.ass).
     held: HeldCaption | None = None
+    held_style: dict | None = None
     if on_screen_caption:
         held_end = min(held_caption_duration(on_screen_caption), duration)
         held = {"text": on_screen_caption, "start": 0.0, "end": held_end}
+        held_style = _face_aware_held_style(
+            style_overrides, face_region, composition, on_screen_caption
+        )
         log.info(
-            "render: caption_only n=%d, held 0.00s-%.2fs: %r",
+            "render: caption_only n=%d, held 0.00s-%.2fs (%s placement): %r",
             n,
             held_end,
+            "face-aware" if held_style else "default",
             on_screen_caption,
         )
 
@@ -721,7 +796,7 @@ def render(
     else:
         if vo and vo["placement"] == "cold_open":
             log.info("render: n=%d cold_open with no vo_%d.words.json — captioning clip only", n, n)
-        ass_text = build_ass(clip_words, group_size, style_overrides, held)
+        ass_text = build_ass(clip_words, group_size, style_overrides, held, held_style)
         log.info(
             "render: wrote %s (%d caption words, tone=%s, group_size=%d)",
             ass_path,

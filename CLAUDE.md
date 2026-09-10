@@ -168,9 +168,11 @@ Every rule above applies to a held `on_screen_caption` exactly as it does to a s
 
 ### Good
 
-- "This was recorded three weeks before the exact thing he's ruling out happened."
-- "He has been asked this forty times and has never once answered it."
-- "Nobody in this room knows he already told the other side."
+These model the 2-6 word target above — each keeps a real angle the clip can't show on its own:
+
+- "Recorded three weeks before it happened."
+- "Dodged this exact question forty times."
+- "He already told the other side."
 
 ### Bad
 
@@ -357,15 +359,27 @@ block so it stays a tone lookup (font family, `primary` colour, `bold`
 inherited). Deliberate overrides, each load-bearing:
 
 - **Font 56, not 104.** A 20-word line at caption size is six lines of shouting.
-- **Its own band, derived from where the karaoke line sits.** Unlike a
-  `cold_open` VO — which silences the source and therefore correctly suppresses
-  the clip's own captions during its window — `caption_only` mutes nothing, so
-  the dialogue captions must keep running. The two blocks ARE on screen
-  together, always; the geometry is load-bearing, not defensive. Every tone but
-  `chaotic` runs its karaoke middle-centred (worst case y 772-1147), so the held
-  line takes the top band from y=250. `chaotic` runs its karaoke top-centred
-  (y 260-510), so its held line takes the bottom band instead, ending at y=1340,
-  60px clear of the y=1400 watermark. Always different thirds of the frame.
+- **Its own band, and — for the blur-fill compositions — clear of the subject's
+  face, not just the karaoke line.** Unlike a `cold_open` VO — which silences the
+  source and therefore correctly suppresses the clip's own captions during its
+  window — `caption_only` mutes nothing, so the dialogue captions must keep
+  running. The two blocks ARE on screen together, always; the geometry is
+  load-bearing, not defensive.
+  - `held_caption_style` (in `clipper.ass`) knows only where the karaoke line
+    sits: every tone but `chaotic` runs karaoke middle-centred (worst case
+    y 772-1147) so the held line takes the top band from y=250; `chaotic` runs
+    karaoke top-centred (y 260-510) so its held line takes the bottom band,
+    ending y=1340. This is the fallback.
+  - **For `tight_crop` / `blur_fill`, `render()` overrides that** with a
+    face-aware band: it maps the detected face box into output coordinates
+    (`_face_output_band`, a uniform scale + vertical centre offset for those
+    two graphs) and drops the held line into whichever clear gap fits —
+    above the face (below the karaoke) first, else between the face and the
+    watermark (`held_band_marginv`). Real bug it fixes: `chaotic` + `tight_crop`
+    used to put the held line in the bottom band at y≈1340, which for a
+    subject-filling crop lands squarely on the streamer's face. When no face is
+    known, or on `facecam_split` (its panel seam is the real constraint there,
+    tracked separately), the fallback stands.
 - **Margins 180/180, not 70/70.** x 180-900, inside the horizontal safe zone and
   still optically centred on 540. A line held for seconds has to clear the
   right-hand like/comment/share rail; a single karaoke word flashing past does
@@ -425,7 +439,7 @@ render argues for it.
 
 Static grid-thumbnail image and upload text, generated stage-4-adjacent per clip — not an automated upload. 2026 platform research finding that drives this design: YouTube Shorts' custom-thumbnail feature (July 2026) is YPP + Studio-desktop only, and the Data API's `thumbnails.set` is undocumented/unreliable for Shorts. So this produces an asset the human copies in at manual upload time, same as the video file itself — never a publishing call.
 
-- `thumbnail_text`, `suggested_title`, `suggested_hashtags`, `suggested_description` are added to the SAME `select`/`select_clip` schema and LLM call that already produces `caption_title`/`vo_script` — context is already loaded, no second call. `thumbnail_text` must read as genuinely different from `caption_title`: punchier, more outrageous, meant to compete for a click with zero context, ideally a striking quoted line of dialogue. `suggested_description` is minimal, not empty, for the upload form's description field: one sentence of context (no spoilers beyond what `suggested_title` already implies — 2-4 sentences was the original spec, tightened after a real one read as padded), a credit line naming the source channel (this project reuses someone else's clip; crediting the stream it came from is not optional), then the first 3 `suggested_hashtags` repeated at the end — platforms surface a description's first 3 hashtags above the title itself, so those three have to be worth surfacing. Keep the credit line and the searchable keywords; cut anything that reads like padding. None of the four can drop an otherwise-good segment on their own — a blank or malformed value only warns and keeps the segment, same posture as an over-long `vo_script` getting nulled rather than sinking the clip.
+- `thumbnail_text`, `suggested_title`, `suggested_hashtags`, `suggested_description` are added to the SAME `select`/`select_clip` schema and LLM call that already produces `caption_title`/`vo_script` — context is already loaded, no second call. `thumbnail_text` must read as genuinely different from `caption_title`: punchier, more outrageous, meant to compete for a click with zero context, ideally a striking quoted line of dialogue. `suggested_description` for the upload form is minimal: a credit line naming the source channel (this project reuses someone else's clip; the credit is not optional) plus the first 3 `suggested_hashtags` (platforms surface those three above the title itself). One opening context sentence is optional — only if it adds something a viewer doesn't already have from `suggested_title`; otherwise the credit line + hashtags alone is a complete description. Was 2-4 sentences, then 1-2; the context sentence is now optional after real output kept padding to hit a count. None of the four can drop an otherwise-good segment on their own — a blank or malformed value only warns and keeps the segment, same posture as an over-long `vo_script` getting nulled rather than sinking the clip.
 - `clipper thumbnail VIDEO_ID [--n N] [--force]` (standalone CLI command, `src/clipper/thumbnail.py`) generates `thumbnail_{n}.jpg` (1080x1920), `metadata_{n}.json`, and `upload_{n}.txt` from an already-selected segment. Runs automatically as `clip`'s last step (see the Stage contract table above); the standalone command stays available for regenerating without re-rendering — e.g. rejecting a thumbnail in review but keeping the video.
 - **`upload_{n}.txt` exists because `metadata_{n}.json` isn't directly usable at upload time.** JSON's quoting and braces aren't what you want selected when pasting into YouTube Studio's title/description fields. `write_metadata()` writes both from the same call — the JSON for tooling, a plain-text `TITLE:` / `DESCRIPTION:` rendering (no quotes, no JSON syntax) for a human to select-all and paste. **Title and description only** — `thumbnail_text`, `caption_title`, and `tone` stay in `metadata_{n}.json` but never appear in `upload_{n}.txt`; they're internal/render-use fields (the burned-in overlay, the video's own on-screen title, the styling lookup), never meant to be read at upload time, and including them would turn a paste-ready file back into one a human has to edit first. A `metadata_{n}.json` written before this file existed gets it backfilled automatically on the next `write_metadata()` call, without needing `--force` — same posture as `vo_words.json`'s own backfill in narrate.py.
 - Frame selection prefers layer 3's own already-computed judgment (`visual_judge.json`'s `best_frame_timestamp` — the vision model that already looked at several frames to decide pass/reject also names which one is most worth using as a thumbnail, extending that same call's schema rather than paying for a second one) when it falls inside the final segment's own `[start, end]`. Falls back to a cheap pixel-stats scan (reusing `clipper.frames.edge_density`, same proxy visual_gate's layer 1 uses) when layer 3 never ran (the long-form YouTube path) or its pick got trimmed out of range by `select_clip`. For `facecam_split`, the fallback scores only the facecam panel's own source region, not the whole frame.

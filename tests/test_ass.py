@@ -9,6 +9,7 @@ import pytest
 from clipper.ass import (
     DEFAULT_STYLE,
     HELD_FONTSIZE,
+    HELD_LINE_HEIGHT_EST,
     HELD_MARGIN_BOTTOM,
     HELD_MARGIN_TOP,
     HELD_MARGIN_X,
@@ -17,6 +18,7 @@ from clipper.ass import (
     build_ass,
     format_ass_time,
     group_words,
+    held_band_marginv,
     held_caption_duration,
     held_caption_style,
     wrap_held_text,
@@ -358,3 +360,40 @@ def test_build_ass_without_held_is_byte_identical_to_before():
     # The held caption must be strictly additive — no drift for the VO/silent modes.
     assert build_ass(_words(), 3) == build_ass(_words(), 3, None, None)
     assert "Style: Held" not in build_ass(_words(), 3)
+
+
+def test_build_ass_held_style_override_wins_over_the_derived_one():
+    karaoke = {"alignment": 8, "marginv": 260}
+    held = {"text": _HELD_LINE, "start": 0.0, "end": 6.2}
+    override = {**held_caption_style(karaoke), "alignment": 8, "marginv": 739}
+    out = build_ass(_words(), 3, karaoke, held, override)
+    held_style_line = next(
+        ln for ln in out.splitlines() if ln.startswith(f"Style: {HELD_STYLE_NAME},")
+    )
+    # ...,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+    fields = held_style_line.split(",")
+    assert fields[-2] == "739"  # MarginV
+    assert fields[-5] == "8"  # Alignment
+
+
+# --- held_band_marginv: fitting the held block into a real clear band -------
+
+
+def test_held_band_marginv_centres_a_block_that_fits():
+    # 520 (below karaoke) .. 1070 (just above a face at y1090): 550px band,
+    # a 2-line block (~132px) fits with room to spare, centred.
+    mv = held_band_marginv(520, 1070, n_lines=2)
+    assert mv is not None
+    block = 2 * HELD_LINE_HEIGHT_EST
+    assert mv == round(520 + ((1070 - 520) - block) / 2)
+    assert 520 < mv < 1070 - block
+
+
+def test_held_band_marginv_rejects_a_band_too_short():
+    # 1090 (face bottom) .. 1290 (above the watermark): 200px, short of a
+    # 3-line block (~198px) plus 24px padding each side.
+    assert held_band_marginv(1090, 1290, n_lines=3) is None
+
+
+def test_held_band_marginv_rejects_an_inverted_band():
+    assert held_band_marginv(1200, 900, n_lines=1) is None

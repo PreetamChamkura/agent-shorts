@@ -211,6 +211,30 @@ HELD_MARGIN_X = 180  # x 180-900: inside CLAUDE.md's x 0-900, still centred on 5
 HELD_MARGIN_TOP = 250  # top safe edge
 HELD_MARGIN_BOTTOM = 580  # 1920-1340: block bottom 60px clear of the y=1400 watermark
 
+# One rendered line of held text, top of glyphs to top of the next line, in
+# output px — 56px cap height plus leading. Used only for the face-aware
+# band fit (held_band_marginv); the wrap itself is by character count.
+HELD_LINE_HEIGHT_EST = 66
+# Minimum breathing room above and below the held block inside whatever clear
+# band it's dropped into.
+HELD_BAND_PAD = 24
+
+
+def held_band_marginv(band_top: float, band_bottom: float, n_lines: int) -> int | None:
+    """Vertical margin (from the top edge, ASS alignment 8) that centres an
+    ``n_lines`` held-caption block inside the clear band ``(band_top,
+    band_bottom)`` in output px — or None if the band is too short to hold
+    the block with ``HELD_BAND_PAD`` above and below.
+
+    The default placement (held_caption_style) only knows where the karaoke
+    line is; this is how the renderer, which also knows where the subject's
+    face is, drops the held line into real empty space instead."""
+    block = n_lines * HELD_LINE_HEIGHT_EST
+    if band_bottom - band_top < block + 2 * HELD_BAND_PAD:
+        return None
+    slack = (band_bottom - band_top) - block
+    return round(band_top + slack / 2)
+
 # WrapStyle 2 means libass does NOT wrap for us — only an explicit \N breaks a
 # line. The karaoke groups are 2-5 words and have always been short enough for
 # that to go unnoticed; a held line of 8-20 words is not, so it is wrapped here,
@@ -306,6 +330,7 @@ def build_ass(
     group_size: int,
     style: dict[str, object] | None = None,
     held: HeldCaption | None = None,
+    held_style: dict[str, object] | None = None,
 ) -> str:
     """Return the full ASS file contents for ``words``.
 
@@ -317,6 +342,11 @@ def build_ass(
     style and its own band (``caption_only`` — see :func:`held_caption_style`).
     It is never combined with a cold_open VO: those are mutually exclusive
     narration modes, so nothing here has to reconcile the two.
+
+    ``held_style`` overrides the derived held style outright — the renderer
+    passes this when it has the subject's face position and can place the
+    held line in real empty space, which :func:`held_caption_style` (karaoke
+    position only) can't do on its own.
     """
     st = {**DEFAULT_STYLE, **(style or {})}
     highlight = str(st["highlight"])
@@ -324,7 +354,7 @@ def build_ass(
 
     style_lines = [_style_line(st)]
     if held is not None:
-        style_lines.append(_style_line(held_caption_style(style)))
+        style_lines.append(_style_line(held_style or held_caption_style(style)))
 
     header = (
         "[Script Info]\n"

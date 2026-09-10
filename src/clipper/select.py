@@ -128,14 +128,14 @@ CAPTION_MAX_WORDS = VO_MAX_WORDS
 THUMBNAIL_TEXT_MIN_WORDS = 3
 THUMBNAIL_TEXT_MAX_WORDS = 6
 
-# suggested_description soft bounds (CLAUDE.md: one sentence of context +
-# the credit line + hashtags — 2-4 sentences was the original spec, tightened
-# down since a real generated description at that length read as padded).
-# The credit line can land as its own sentence or fused into the context
-# sentence, so 1-2 is the real range, not a fixed count. Same warn-and-keep
-# posture as thumbnail_text's word count above — a sentence count off is a
-# reason to look at the field, not to drop a real segment over a marketing
-# field.
+# suggested_description soft bounds. The spec walked down over time: 2-4
+# sentences -> 1-2 -> now a credit line + the first 3 hashtags, with an
+# opening context sentence optional (only when it adds something the title
+# doesn't). So the real floor is one sentence (the credit line — "Clip via
+# X on Twitch.") and the ceiling is two (credit line + the optional
+# context sentence). Same warn-and-keep posture as thumbnail_text's word
+# count above — a sentence count outside this is a reason to look at the
+# field, not to drop a real segment over a marketing field.
 DESCRIPTION_MIN_SENTENCES = 1
 DESCRIPTION_MAX_SENTENCES = 2
 

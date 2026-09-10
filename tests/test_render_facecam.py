@@ -228,3 +228,62 @@ def test_cache_hit_never_runs_detection(tmp_path, monkeypatch):
 
     out = render_mod.render("vid1", 0, 0.0, 20.0, "confident")
     assert out == str(wd / "out_0.mp4")
+
+
+# --- held-caption face-aware placement (caption_only over tight_crop) -------
+# Real bug: the held caption's band only avoided the karaoke line, not the
+# subject — in tight_crop it landed on the streamer's face. Fixed by mapping
+# the detected face into output coordinates and dropping the held line into
+# real empty space either side of it.
+
+
+def test_face_output_band_maps_tight_crop_coordinates():
+    from clipper.render import _face_output_band
+
+    # 1920x1080 source, face at y=684 h=163 -> tight_crop scales by 1728/1920
+    # = 0.9 and centres the 972-tall result in 1920 (offset 474).
+    band = _face_output_band(_region(1275, 684, 163, 163), "tight_crop")
+    assert band is not None
+    top, bottom = band
+    assert round(top) == round(684 * 0.9 + 474)
+    assert round(bottom) == round((684 + 163) * 0.9 + 474)
+
+
+def test_face_output_band_none_for_panel_composition_or_no_face():
+    from clipper.render import _face_output_band
+
+    assert _face_output_band(_region(0, 0, 100, 100), "facecam_split") is None
+    assert _face_output_band(None, "tight_crop") is None
+
+
+def test_face_aware_held_style_clears_the_face_for_chaotic():
+    from clipper.render import _face_aware_held_style
+    from clipper.styles import style_for_tone
+
+    style_overrides, _ = style_for_tone("chaotic")  # karaoke top-centred
+    face = _region(1275, 684, 163, 163)
+    hs = _face_aware_held_style(style_overrides, face, "tight_crop", "He's the one being accused")
+    assert hs is not None
+    assert hs["alignment"] == 8  # top-anchored, not the default bottom (2)
+
+    from clipper.render import _face_output_band
+
+    face_top, _ = _face_output_band(face, "tight_crop")
+    # the held block sits entirely above the face
+    n_lines = 2
+    from clipper.ass import HELD_LINE_HEIGHT_EST
+
+    assert hs["marginv"] + n_lines * HELD_LINE_HEIGHT_EST < face_top
+
+
+def test_face_aware_held_style_falls_back_when_no_face():
+    from clipper.render import _face_aware_held_style
+    from clipper.styles import style_for_tone
+
+    style_overrides, _ = style_for_tone("chaotic")
+    assert _face_aware_held_style(style_overrides, None, "tight_crop", "text here") is None
+    # panel composition also falls back (its own seam is the constraint there)
+    assert (
+        _face_aware_held_style(style_overrides, _region(0, 0, 50, 50), "facecam_split", "text")
+        is None
+    )
