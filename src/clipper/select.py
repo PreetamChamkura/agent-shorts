@@ -191,6 +191,7 @@ _RESPONSE_SCHEMA = {
                     "confidence": {"type": "number"},
                     "thumbnail_text": {"type": "string"},
                     "suggested_title": {"type": "string"},
+                    "title_style": {"type": "string"},
                     # No minItems/maxItems — confirmed for real that
                     # output_config's json_schema rejects any array minItems
                     # other than 0 or 1 ("'minItems' values other than 0 or 1
@@ -220,6 +221,7 @@ _RESPONSE_SCHEMA = {
                     "confidence",
                     "thumbnail_text",
                     "suggested_title",
+                    "title_style",
                     "suggested_hashtags",
                     "suggested_description",
                 ],
@@ -768,6 +770,14 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
     if not suggested_title:
         log.warning("select: %r has no suggested_title", hook)
 
+    title_style = str(raw.get("title_style", "")).strip().lower()
+    if title_style not in ("concrete", "generic"):
+        log.warning(
+            "select: %r title_style is %r, want 'concrete' or 'generic' — keeping as-is",
+            hook,
+            title_style,
+        )
+
     suggested_hashtags = [
         str(h).strip() for h in (raw.get("suggested_hashtags") or []) if str(h).strip()
     ]
@@ -818,6 +828,7 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
         "confidence": round(confidence, 2),
         "thumbnail_text": thumbnail_text,
         "suggested_title": suggested_title,
+        "title_style": title_style,
         "suggested_hashtags": suggested_hashtags,
         "suggested_description": suggested_description,
     }

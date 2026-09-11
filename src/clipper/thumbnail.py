@@ -866,7 +866,7 @@ def _format_upload_text(seg: dict) -> str:
 
 
 def write_metadata(video_id: str, n: int, seg: dict, *, force: bool = False) -> tuple[str, str]:
-    """Write work/{video_id}/metadata_{n}.json (suggested_title,
+    """Write work/{video_id}/metadata_{n}.json (suggested_title, title_style,
     thumbnail_text, suggested_hashtags, suggested_description from
     segments.json — structured, for tooling) and work/{video_id}/upload_{n}.txt
     (title + description as plain text — for a human to select-all and paste
@@ -887,6 +887,7 @@ def write_metadata(video_id: str, n: int, seg: dict, *, force: bool = False) -> 
         "video_id": video_id,
         "n": n,
         "suggested_title": seg.get("suggested_title", ""),
+        "title_style": seg.get("title_style", ""),
         "thumbnail_text": seg.get("thumbnail_text", ""),
         "suggested_hashtags": seg.get("suggested_hashtags", []),
         "suggested_description": seg.get("suggested_description", ""),

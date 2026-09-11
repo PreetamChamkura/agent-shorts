@@ -716,6 +716,26 @@ def test_write_metadata_writes_expected_fields(tmp_path, monkeypatch):
     assert txt_out == str(wd / "upload_0.txt")
 
 
+def test_write_metadata_title_style_in_json_not_in_upload_txt(tmp_path, monkeypatch):
+    # title_style is a self-report field for tooling (see CLAUDE.md's
+    # Thumbnail + upload metadata section) — never meant to be pasted into
+    # the upload form, so it stays out of upload_{n}.txt like thumbnail_text
+    # and tone.
+    wd = _setup(tmp_path, monkeypatch)
+    seg = {
+        "suggested_title": "He ruled this out three weeks before it happened",
+        "title_style": "concrete",
+        "suggested_description": "He calls it early. Clip via Shroud on Twitch. #valorant",
+    }
+    write_metadata("vid1", 0, seg)
+    data = json.loads((wd / "metadata_0.json").read_text())
+    text = (wd / "upload_0.txt").read_text()
+
+    assert data["title_style"] == "concrete"
+    assert "concrete" not in text
+    assert "title_style" not in text
+
+
 def test_write_metadata_upload_txt_is_plain_no_quotes_or_json(tmp_path, monkeypatch):
     wd = _setup(tmp_path, monkeypatch)
     seg = {

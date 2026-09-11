@@ -628,6 +628,31 @@ def test_validate_segment_out_of_range_hashtag_count_keeps_segment(caplog):
     assert seg["suggested_hashtags"] == ["#one"]
 
 
+# --- title_style: self-reported "concrete" or "generic", tracked so real ---
+# posted volume can eventually compare CTR by style (see CLAUDE.md's
+# Thumbnail + upload metadata section — neither style is the "real" one).
+
+
+def test_validate_segment_passes_through_title_style():
+    seg = validate_segment(_raw(title_style="generic"), _words(60))
+    assert seg is not None
+    assert seg["title_style"] == "generic"
+
+
+def test_validate_segment_keeps_segment_with_missing_title_style():
+    seg = validate_segment(_raw(), _words(60))
+    assert seg is not None
+    assert seg["title_style"] == ""
+
+
+def test_validate_segment_warns_and_keeps_invalid_title_style(caplog):
+    with caplog.at_level(logging.WARNING):
+        seg = validate_segment(_raw(title_style="clickbait"), _words(60))
+    assert seg is not None
+    assert seg["title_style"] == "clickbait"
+    assert "title_style" in caplog.text
+
+
 # --- suggested_description: one sentence + credit line + hashtags, not -----
 # 2-4 sentences (tightened after a real generated description at that length
 # read as padded — see CLAUDE.md's Thumbnail + upload metadata section).
