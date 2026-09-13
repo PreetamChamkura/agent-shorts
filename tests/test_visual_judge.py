@@ -204,7 +204,10 @@ def test_judge_clip_returns_structured_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {"passed": False, "reason": "static"},
+        lambda client, video_id, prompt, paths_, model, tier_line: {
+            "passed": False,
+            "reason": "static",
+        },
     )
 
     result = judge_clip("vid1")
@@ -226,7 +229,7 @@ def test_judge_clip_pass_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model, tier_line: {
             "passed": True,
             "reason": "real motion throughout",
         },
@@ -270,7 +273,10 @@ def test_judge_clip_uses_facecam_split_video_chain_when_detected(tmp_path, monke
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {"passed": True, "reason": "fine"},
+        lambda client, video_id, prompt, paths_, model, tier_line: {
+            "passed": True,
+            "reason": "fine",
+        },
     )
 
     result = judge_clip("vid1")
@@ -340,7 +346,7 @@ def test_judge_clip_maps_best_frame_index_to_its_timestamp(tmp_path, monkeypatch
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model, tier_line: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,
@@ -369,7 +375,7 @@ def test_judge_clip_best_frame_index_accounts_for_extraction_gaps(tmp_path, monk
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model, tier_line: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 1,
@@ -395,7 +401,7 @@ def test_judge_clip_out_of_range_best_frame_index_falls_back_to_zero(tmp_path, m
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model, tier_line: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 99,
@@ -452,7 +458,7 @@ def test_judge_clip_best_frame_reason_matching_index_is_trusted(tmp_path, monkey
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model, tier_line: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,
@@ -478,7 +484,7 @@ def test_judge_clip_best_frame_reason_mismatch_falls_back_to_zero(tmp_path, monk
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model, tier_line: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,
@@ -507,7 +513,7 @@ def test_judge_clip_best_frame_reason_missing_falls_back_to_zero(tmp_path, monke
     monkeypatch.setattr(
         vj,
         "_call_model",
-        lambda client, video_id, prompt, paths_, model: {
+        lambda client, video_id, prompt, paths_, model, tier_line: {
             "passed": True,
             "reason": "fine",
             "best_frame_index": 2,
@@ -590,3 +596,88 @@ def test_judge_clip_cache_hit_does_not_require_source_to_exist(tmp_path, monkeyp
 
     result = vj.judge_clip("vid1")
     assert result["reason"] == "cached"
+
+
+# --- audience tier: which bar this verdict was reached under ----------------
+# The tier travels in the USER turn, not the cached system prompt, so the
+# system block stays at 2 cache namespaces (by composition) instead of 4
+# (composition x tier) to carry one word of per-clip information.
+
+
+def _judge_capturing_tier(tmp_path, monkeypatch, info=None):
+    """Run judge_clip and return (verdict, tier_line actually sent)."""
+    import json as _json
+
+    import clipper.visual_judge as vj
+
+    wd = _setup(tmp_path, monkeypatch)
+    if info is not None:
+        (wd / "source.info.json").write_text(_json.dumps(info))
+
+    monkeypatch.setattr(
+        vj,
+        "_extract_preview_frame",
+        lambda source, ts, video_fc, out_path: out_path.write_bytes(b"fake-png-bytes"),
+    )
+    seen = {}
+
+    def fake_call(client, video_id, prompt, paths_, model, tier_line):
+        seen["tier_line"] = tier_line
+        return {
+            "passed": True,
+            "reason": "ok",
+            "best_frame_index": 0,
+            "best_frame_reason": "Frame 0: fine",
+        }
+
+    monkeypatch.setattr(vj, "_call_model", fake_call)
+    return vj.judge_clip("vid1"), seen["tier_line"]
+
+
+def test_judge_clip_sends_high_tier_for_a_viral_clip(tmp_path, monkeypatch):
+    verdict, tier_line = _judge_capturing_tier(tmp_path, monkeypatch, {"view_count": 17_755_365})
+    assert "HIGH" in tier_line
+    assert "17,755,365" in tier_line
+    assert verdict["audience_tier"] == "HIGH"
+    assert verdict["source_view_count"] == 17_755_365
+
+
+def test_judge_clip_sends_standard_tier_for_a_small_clip(tmp_path, monkeypatch):
+    verdict, tier_line = _judge_capturing_tier(tmp_path, monkeypatch, {"view_count": 3_287})
+    assert "STANDARD" in tier_line
+    assert verdict["audience_tier"] == "STANDARD"
+    assert verdict["source_view_count"] == 3_287
+
+
+def test_judge_clip_without_info_json_is_standard(tmp_path, monkeypatch):
+    # Unchanged behaviour for anything that has no view-count signal.
+    verdict, tier_line = _judge_capturing_tier(tmp_path, monkeypatch)
+    assert "STANDARD" in tier_line
+    assert verdict["audience_tier"] == "STANDARD"
+    assert verdict["source_view_count"] is None
+
+
+def test_judge_clip_tier_is_recorded_in_the_cached_verdict(tmp_path, monkeypatch):
+    # A verdict reached under the recognition bar is a different judgment
+    # from one reached under the cold-viewer bar; the cached json is the
+    # only place that still says which was applied.
+    import json as _json
+
+    _judge_capturing_tier(tmp_path, monkeypatch, {"view_count": 500_000})
+    cached = _json.loads((tmp_path / "vid1" / "visual_judge.json").read_text())
+    assert cached["audience_tier"] == "HIGH"
+    assert cached["source_view_count"] == 500_000
+
+
+def test_judge_clip_tier_does_not_change_the_cached_system_prompt(tmp_path, monkeypatch):
+    # The prompt is the cached system block. If the tier leaked into it, the
+    # cache would fork per tier — the exact thing putting it in the user turn
+    # avoids.
+    import clipper.visual_judge as vj
+
+    prompt = vj._build_prompt("tight_crop", 5)
+    assert "17,755,365" not in prompt
+    # Both tiers' rules ARE in the cached block — that's what makes the
+    # per-call half only need to name which one applies.
+    assert "STANDARD" in prompt
+    assert "HIGH" in prompt

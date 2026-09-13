@@ -925,3 +925,67 @@ def test_validate_segment_spoken_segment_carries_a_null_caption():
     assert seg is not None
     assert seg["on_screen_caption"] is None
     assert seg["vo_script"] is not None
+
+
+# --- audience tier reaching select_clip's prompt ----------------------------
+# The tier rules are fixed text and belong in the cached system half; only
+# THIS clip's tier is per-call data and belongs in the user half. Both halves
+# are asserted because getting it backwards silently forks the prompt cache.
+
+
+def _select_clip_capturing_prompt(tmp_path, monkeypatch, info=None):
+    words = _words(60, step=1.0)
+    wd = _setup_clip(tmp_path, monkeypatch, words, duration=60.0)
+    if info is not None:
+        (wd / "source.info.json").write_text(json.dumps(info))
+    calls = []
+    monkeypatch.setattr(
+        select_mod,
+        "_call_model",
+        lambda client, video_id, system_text, user_text, model: calls.append(
+            (system_text, user_text)
+        )
+        or {"segments": []},
+    )
+    select_clip("clipid")
+    return calls[0]
+
+
+def test_select_clip_sends_high_tier_for_a_viral_clip(tmp_path, monkeypatch):
+    system_text, user_text = _select_clip_capturing_prompt(
+        tmp_path, monkeypatch, {"view_count": 17_755_365}
+    )
+    assert "Audience tier: HIGH" in user_text
+    assert "17,755,365" in user_text
+    # the real number is per-call data and must never land in the cached half
+    assert "17,755,365" not in system_text
+
+
+def test_select_clip_sends_standard_tier_for_a_small_clip(tmp_path, monkeypatch):
+    _, user_text = _select_clip_capturing_prompt(tmp_path, monkeypatch, {"view_count": 3_287})
+    assert "Audience tier: STANDARD" in user_text
+
+
+def test_select_clip_without_info_json_is_standard(tmp_path, monkeypatch):
+    # Unchanged behaviour where there is no view-count signal at all.
+    _, user_text = _select_clip_capturing_prompt(tmp_path, monkeypatch)
+    assert "Audience tier: STANDARD" in user_text
+    assert "unknown" in user_text
+
+
+def test_both_tiers_rules_live_in_the_cached_half(tmp_path, monkeypatch):
+    system_text, _ = _select_clip_capturing_prompt(
+        tmp_path, monkeypatch, {"view_count": 17_755_365}
+    )
+    assert "## Audience tier" in system_text
+    # both tiers described, so the per-call half only has to name which applies
+    assert "**STANDARD**" in system_text
+    assert "**HIGH**" in system_text
+    # the HIGH-tier narrator guidance is fixed text and belongs here too
+    assert "lean into the recognition" in system_text
+
+
+def test_audience_tier_is_a_known_placeholder():
+    # render_prompt rejects unknown placeholder names outright, so this is
+    # what actually permits the keyword above.
+    assert "audience_tier" in select_mod._PLACEHOLDERS

@@ -43,6 +43,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from .audience import TIER_HIGH, describe_tier, resolve_audience_tier
 from .face_detect import find_face_region, is_small_corner_facecam
 from .ffmpeg import probe_duration, run_ffmpeg
 from .paths import PROMPTS_DIR, work_dir
@@ -234,7 +235,14 @@ def _log_usage(video_id: str, model: str, usage) -> None:
     )
 
 
-def _call_model(client, video_id: str, prompt: str, image_paths: list[Path], model: str) -> dict:
+def _call_model(
+    client,
+    video_id: str,
+    prompt: str,
+    image_paths: list[Path],
+    model: str,
+    tier_line: str,
+) -> dict:
     """The only networked call in this module. Returns the parsed JSON verdict.
 
     ``prompt`` goes in a cached `system` block, not the user turn: real
@@ -244,8 +252,14 @@ def _call_model(client, video_id: str, prompt: str, image_paths: list[Path], mod
     call after the first with the same composition. Only the real,
     genuinely-unique-per-clip images go in the user turn, where they can
     never cache anyway.
+
+    ``tier_line`` goes in the user turn for exactly that reason. The rules for
+    BOTH tiers live in the cached system prompt — byte-identical on every
+    call — while only this clip's own tier travels per-call. Putting the tier
+    in the system block instead would fork the cache into 4 namespaces
+    (composition x tier) to carry one word of real information.
     """
-    content: list[dict] = []
+    content: list[dict] = [{"type": "text", "text": f"Audience tier for this clip: {tier_line}"}]
     for path in image_paths:
         b64 = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
         content.append(
@@ -323,6 +337,16 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
 
     timestamps = _sample_timestamps(duration, N_SAMPLE_FRAMES)
 
+    tier, view_count = resolve_audience_tier(wd)
+    log.info(
+        "visual_judge: %s audience tier %s — %s",
+        video_id,
+        describe_tier(tier, view_count),
+        "judging on recognition, not cold-viewer appeal"
+        if tier == TIER_HIGH
+        else "judging as a cold viewer would",
+    )
+
     import anthropic  # imported lazily so the pure helpers stay import-light
 
     client = anthropic.Anthropic()
@@ -342,7 +366,9 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
             raise RuntimeError(f"visual_judge: no preview frames extracted for {video_id}")
 
         prompt = _build_prompt(composition, len(frame_paths))
-        verdict = _call_model(client, video_id, prompt, frame_paths, model)
+        verdict = _call_model(
+            client, video_id, prompt, frame_paths, model, describe_tier(tier, view_count)
+        )
 
     # best_frame_index refers to the model's own numbering of the images it
     # was actually shown (0..len(frame_paths)-1) — that's frame_paths' order,
@@ -391,6 +417,12 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
         "frames_sampled": len(frame_paths),
         "best_frame_timestamp": best_frame_timestamp,
         "best_frame_reason": best_frame_reason,
+        # Recorded, not just used: a verdict reached under the recognition bar
+        # is a different judgment from one reached under the cold-viewer bar,
+        # and six months from now the cached json is the only place that says
+        # which was applied.
+        "audience_tier": tier,
+        "source_view_count": view_count,
     }
     log.info(
         "visual_judge: %s %s (%s, %d frame(s)) — %s",

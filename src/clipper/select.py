@@ -70,6 +70,7 @@ import json
 import logging
 import re
 
+from .audience import describe_tier, resolve_audience_tier
 from .paths import PROMPTS_DIR, work_dir
 from .styles import style_for_tone
 
@@ -164,6 +165,11 @@ _PLACEHOLDERS = (
     "window_start",
     "window_end",
     "transcript_window",
+    # select_clip.md only — the long-form select.md path has no equivalent
+    # signal (a YouTube upload's view count says nothing about whether one
+    # moment inside it is recognizable), so it neither supplies nor
+    # references this one.
+    "audience_tier",
 )
 
 # output_config schema — guarantees the response is valid JSON in this shape,
@@ -1018,6 +1024,7 @@ def select_clip(video_id: str, *, force: bool = False, model: str = MODEL) -> di
     template = (PROMPTS_DIR / "select_clip.md").read_text()
     dynamic_template, static_prompt = split_cacheable_prompt(template)
     meta = _source_metadata(wd)
+    tier, view_count = resolve_audience_tier(wd)
 
     import anthropic  # imported lazily so the pure helpers stay import-light
 
@@ -1030,13 +1037,15 @@ def select_clip(video_id: str, *, force: bool = False, model: str = MODEL) -> di
         window_start=format_hmmss(0.0),
         window_end=format_hmmss(clip_duration),
         transcript_window=render_transcript(words),
+        audience_tier=describe_tier(tier, view_count),
         **meta,
     )
     log.info(
-        "select_clip: %s (%.1fs, %d words) -> 1 LLM call to %s",
+        "select_clip: %s (%.1fs, %d words, audience tier %s) -> 1 LLM call to %s",
         video_id,
         clip_duration,
         len(words),
+        describe_tier(tier, view_count),
         model,
     )
     response = _call_model(client, video_id, static_prompt, user_prompt, model)

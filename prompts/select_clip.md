@@ -6,6 +6,7 @@ Channel: {channel_name}
 Clip title: {video_title}
 Created: {upload_date}
 Description: {video_description_first_500_chars}
+Audience tier: {audience_tier}
 
 ## Clip transcript
 
@@ -18,21 +19,41 @@ Full transcript of the clip, {window_start} to {window_end}. Timestamps in [h:mm
      prompt. Everything above goes in the per-call user turn. If you add a
      placeholder, it MUST go above this line, or the cache never matches. -->
 
+## Audience tier
+
+The Source block names this clip's tier. It changes what counts as a clip worth packaging, and it changes what the narrator line is for.
+
+**STANDARD** — the default, and every rule in this prompt applies exactly as written. Assume the viewer has never heard of this creator: the clip has to stand on its own spoken beat, and if there is no locatable setup-to-payoff arc in the transcript, `{"segments": []}` is the correct answer.
+
+**HIGH** — this clip's source moment already has a large existing audience, and the real view count is named alongside the tier. The people a short of this reaches are substantially people who already recognize the creator or the moment, and recognition is itself the reason they watch. On this tier recognition substitutes for a strict setup-to-payoff structure.
+
+What relaxes on HIGH:
+
+- **The locatable-spoken-beat requirement.** A clip that is a recognizable person reacting, with no clean arc anywhere in the transcript, is still worth packaging here. "No coherent beat" alone is no longer grounds for `{"segments": []}` — ask instead whether someone who already knows this creator would want to watch this moment.
+- **Thin transcripts.** Short, fragmentary, or largely non-verbal dialogue is expected on this tier rather than disqualifying. The visual gate has already looked at the real frames and passed them.
+
+What does not relax on HIGH — these are mechanical or structural, and recognition has nothing to say about them:
+
+- The 18-58 second range and every trimming rule in Task below.
+- `why` still has to name at least two real timestamps. On this tier you are locating the recognizable moment rather than proving an arc — "clip opens at 0.0 mid-argument, the moment this got clipped for lands at 14.0" is a perfectly good `why` — but it still has to point at real times in this transcript. A `why` with fewer than two timestamps is discarded mechanically, on either tier.
+- `confidence` is still your own honest read, scored against this tier's own bar. Do not inflate it because the clip is popular — the view count already did its job by setting the tier, and counting it twice just pushes weak picks through. A recognizable moment you genuinely think lands is a high-confidence HIGH-tier pick; a recognizable moment that would still bore its own fans is a low one, and low ones are still meant to be rejected.
+
 ## Task
 
 Do not hunt for a better moment inside the clip, and do not second-guess its edges beyond the trimming described below.
 
-1. Decide whether the clip works as a standalone vertical short at all. Return `{"segments": []}` if it doesn't — see Reject below. That is a correct and expected answer for a clip that turns out to be crosstalk, needs visual context the transcript can't confirm, or has no coherent beat.
+1. Decide whether the clip works as a standalone vertical short at all. Return `{"segments": []}` if it doesn't — see Reject below. That is a correct and expected answer for a clip that turns out to be crosstalk, needs visual context the transcript can't confirm, or (on STANDARD) has no coherent beat.
 2. If it works, set `start`/`end` to the tightest span that keeps the complete beat:
    - If the full clip already reads clean and fits 18-58 seconds, use its full span
    - If the clip runs past 58 seconds or carries dead air the beat doesn't need, trim inward to the smallest span that keeps the setup and payoff intact
    - Runs 18-58 seconds inclusive. Within that, prefer 25-40 seconds unless the setup-to-payoff arc genuinely needs more room — don't pad a tight moment out to 40s, and don't force a beat that naturally needs 45-50s into a shorter cut and lose the payoff
    - If nothing 18-58 seconds long inside the clip captures a complete beat — the clip itself is too short, or any trim that fits would cut the payoff — return `{"segments": []}` rather than forcing it. Never invent content or extend past what the transcript actually contains
 
-Reject without exception:
-- Crosstalk with no discernible point
-- Anything requiring visual context the transcript can't confirm exists
-- A clip whose point depends entirely on a running bit the standalone excerpt can't carry
+Reject without exception on STANDARD. On HIGH each one narrows as noted — see Audience tier above:
+
+- Crosstalk with no discernible point — on HIGH, still a reject when there is no recognizable moment either, but a recognizable person reacting is not "no point" on that tier
+- Anything requiring visual context the transcript can't confirm exists — unchanged on both tiers for anything the frames can't carry, though note the visual gate has already confirmed these particular frames are legible and competently cropped
+- A clip whose point depends entirely on a running bit the standalone excerpt can't carry — **this one inverts on HIGH.** A running bit the existing audience already follows is recognition value, not a disqualifier. It only disqualifies on HIGH if the excerpt fails even for people who do know the bit
 
 ## Narrator commentary
 
@@ -51,6 +72,21 @@ Too long vs. the target register — same fact, half the words:
 - "The most-searched woman on the internet came over to enter a guacamole contest." → "The internet's most searched woman. Making guac."
 
 This compounds with the one-beat rule above, it doesn't replace it — a short line can still smuggle in two claims.
+
+### On a HIGH-tier clip, lean into the recognition
+
+Everything above still holds — one beat, the 2-6 word target, present tense, no hype, and no describing the visible action. What changes on this tier is what the line is *for*, and it changes the line materially enough to be worth stating outright.
+
+On STANDARD the line's job is to manufacture a reason to care about a moment nobody knows. On HIGH that reason already exists in the viewer's head, and the line's job is to *trigger* it — name the creator, the moment, the running context, the thing that makes someone think "oh, that one." Straining to build a curiosity hook from scratch on a clip that doesn't have one produces a vague, hedged line; naming the recognizable thing doesn't.
+
+- Right on HIGH: "The guacamole contest one." / "His actual reaction to the ban." / "Day one of the rivalry."
+- Wrong on HIGH: a manufactured mystery — "He had no idea what was coming" — on a clip where nothing in particular is coming. That is a curiosity gap written for a viewer who isn't the one watching this.
+
+**Naming the moment is not describing the visible action, and the persona rule against describing still stands unchanged.** "He's sitting at his desk talking" describes what anyone watching can already see, and is still wrong. "The guacamole contest one" names *which* moment this is — context the frames cannot carry on their own, which is precisely the thing that rule asks the line to add. The test in the persona rules is unchanged too: say the line without the clip, and it should land. On this tier it lands by recognition rather than by curiosity.
+
+This applies to `on_screen_caption` exactly as it does to `vo_script` — same editorial line, different delivery, as everywhere else in this prompt.
+
+If the moment genuinely has no name — recognizable as this creator, but not a specific known beat anyone would place — then the ordinary rules apply unchanged. Don't invent a reference that isn't there; a fabricated callback is worse than an honest ordinary line.
 
 If there is nothing — the clip is entirely self-explanatory — set `vo_script` to null rather than writing filler. A clip with no VO is fine. A clip with an empty VO is not.
 
