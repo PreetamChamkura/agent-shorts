@@ -508,7 +508,11 @@ def test_validate_segment_corrects_drifted_punchline_at_to_phrase_start():
     assert seg["punchline_at"] == 35.0  # corrected to the phrase's own start
 
 
-def test_validate_segment_leaves_punchline_at_within_tolerance_unchanged():
+def test_validate_segment_derives_punchline_at_even_within_old_tolerance():
+    # The correction is unconditional now, not gated on drift exceeding
+    # PUNCHLINE_DRIFT_TOLERANCE — a small, plausible-looking guess gets
+    # replaced with the real derived value exactly like a wildly wrong one,
+    # since ANY independent guess is what this removes, not just bad ones.
     lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(30)]
     payoff_words = [
         {"word": "he's", "start": 35.0, "end": 35.3},
@@ -525,10 +529,10 @@ def test_validate_segment_leaves_punchline_at_within_tolerance_unchanged():
     assert PUNCHLINE_DRIFT_TOLERANCE >= 1.0
     seg = validate_segment(raw, words)
     assert seg is not None
-    assert seg["punchline_at"] == 34.0  # left as-is, not snapped to 35.0
+    assert seg["punchline_at"] == 35.0  # derived, not left at the model's 34.0 guess
 
 
-def test_validate_segment_leaves_punchline_at_inside_phrase_span_unchanged():
+def test_validate_segment_punchline_at_already_matching_derived_value_is_a_noop():
     lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(30)]
     payoff_words = [
         {"word": "he's", "start": 35.0, "end": 35.3},
@@ -539,12 +543,54 @@ def test_validate_segment_leaves_punchline_at_inside_phrase_span_unchanged():
     raw = _raw(
         start=0.0,
         end=35.8,
-        punchline_at=35.3,  # already inside the phrase's own span
-        why="setup at 0.0, payoff at 35.3 with 'he's very affordable'",
+        punchline_at=35.0,  # already equal to the phrase's own start
+        why="setup at 0.0, payoff at 35.0 with 'he's very affordable'",
     )
     seg = validate_segment(raw, words)
     assert seg is not None
-    assert seg["punchline_at"] == 35.3
+    assert seg["punchline_at"] == 35.0
+
+
+def test_validate_segment_punchline_derivation_logs_info_for_small_drift(caplog):
+    lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(30)]
+    payoff_words = [
+        {"word": "he's", "start": 35.0, "end": 35.3},
+        {"word": "very", "start": 35.3, "end": 35.5},
+        {"word": "affordable.", "start": 35.5, "end": 35.8},
+    ]
+    words = lead + payoff_words
+    raw = _raw(
+        start=0.0,
+        end=35.8,
+        punchline_at=34.0,  # within PUNCHLINE_DRIFT_TOLERANCE
+        why="setup at 0.0, payoff at 34.0 with 'he's very affordable'",
+    )
+    with caplog.at_level(logging.INFO):
+        validate_segment(raw, words)
+    records = [r for r in caplog.records if "replaced with" in r.message]
+    assert len(records) == 1
+    assert records[0].levelname == "INFO"
+
+
+def test_validate_segment_punchline_derivation_logs_warning_for_large_drift(caplog):
+    lead = [{"word": f"w{i}", "start": float(i), "end": float(i) + 0.3} for i in range(30)]
+    payoff_words = [
+        {"word": "he's", "start": 35.0, "end": 35.3},
+        {"word": "very", "start": 35.3, "end": 35.5},
+        {"word": "affordable.", "start": 35.5, "end": 35.8},
+    ]
+    words = lead + payoff_words
+    raw = _raw(
+        start=0.0,
+        end=35.8,
+        punchline_at=25.0,  # 10s before the phrase's real start — past tolerance
+        why="setup at 0.0, payoff at 25.0 with 'he's very affordable'",
+    )
+    with caplog.at_level(logging.INFO):
+        validate_segment(raw, words)
+    records = [r for r in caplog.records if "replaced with" in r.message]
+    assert len(records) == 1
+    assert records[0].levelname == "WARNING"
 
 
 def test_validate_segment_skips_punchline_check_when_quote_not_found():

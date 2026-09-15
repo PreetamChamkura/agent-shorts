@@ -166,16 +166,29 @@ THUMBNAIL_TEXT_MAX_WORDS = 6
 DESCRIPTION_MIN_SENTENCES = 1
 DESCRIPTION_MAX_SENTENCES = 2
 
-# How far punchline_at may sit outside the quoted payoff's own real
-# transcript span before it's treated as drifted rather than ordinary
-# jitter — see validate_segment's punchline_at-vs-phrase-span check. Real
-# bug found from real output: a segment's punchline_at (112.0) sat 5.3s
-# before its own quoted payoff phrase actually started (117.30) — `end`
-# already covered the phrase (the existing check this one is next to), but
-# nothing had ever confirmed punchline_at itself wasn't off in the same way.
-# That drift fed real downstream mistakes: pre_punchline VO timing anchors
-# 1.2s before punchline_at, and clipper.thumbnail's fallback frame search
-# centers on it — both would land on the wrong moment.
+# Log-severity split only, not a correction gate — see validate_segment's
+# punchline_at derivation below. `punchline_at` used to be trusted as the
+# model's own independent guess (checked against the quoted payoff's real
+# span only loosely, correcting just when the two disagreed by more than
+# this many seconds). Real bug found from real output: a segment's
+# punchline_at (112.0) sat 5.3s before its own quoted payoff phrase actually
+# started (117.30) — `end` already covered the phrase (the existing check
+# this one is next to), but nothing had ever confirmed punchline_at itself
+# wasn't off in the same way. That drift fed real downstream mistakes:
+# pre_punchline VO timing anchors 1.2s before punchline_at, and
+# clipper.thumbnail's fallback frame search centers on it.
+#
+# Tolerance-gated correction wasn't enough: real repeated trials on one clip
+# (the ironmouse "Spanish ballad" clip) produced punchline_at values of
+# 26.0, 28.5, 29.0, 38.0, and 40.0 across identical input — a 14-second
+# spread, well past this tolerance, meaning the model's own guess was never
+# something to trust as a baseline in the first place. Same fix `end`
+# already has: whenever the payoff quote is locatable in the real
+# transcript, punchline_at is DERIVED from that phrase's own real start,
+# unconditionally — not compared against the model's guess and corrected
+# only past a threshold. This constant now only decides whether that
+# derivation gets logged at INFO (small, expected jitter) or WARNING (the
+# model's guess was substantially off, worth noticing if it happens often).
 PUNCHLINE_DRIFT_TOLERANCE = 2.0
 
 # Placeholders in prompts/select.md. Substituted by explicit replace, never
@@ -728,30 +741,37 @@ def validate_segment(raw: dict, words: list[dict]) -> dict | None:
                 )
                 return None
 
-    # punchline_at must actually fall within (or very close to) the quoted
-    # payoff's own real span — not just have `end` cover it, which the check
-    # above only confirms about the SEGMENT boundary, not this specific
-    # timestamp. Real bug found from real output: end already covered a
-    # payoff phrase whose real span was 117.30-119.60, while punchline_at
-    # itself sat at 112.0 — 5.3s before the phrase even started. That drift
-    # is invisible to the end-coverage check alone. Corrected to the
-    # phrase's own start (where the payoff actually begins landing) rather
-    # than dropping an otherwise-good segment over one timestamp field —
-    # same posture as extending `end` above. Only enforced when the quote is
-    # locatable, same as the end-coverage check.
+    # punchline_at is DERIVED from the quoted payoff's own real transcript
+    # span whenever that quote is locatable — not trusted as a separate,
+    # independently-guessed timestamp from the model and merely sanity-
+    # checked against the quote. Same posture as `end`'s extension above,
+    # and the same reason: real repeated trials on one clip showed the
+    # model's own punchline_at guess swinging 26.0-40.0 across identical
+    # input (see PUNCHLINE_DRIFT_TOLERANCE's own comment) — a value that
+    # unstable was never something to treat as correct-until-proven-wrong.
+    # Set to the phrase's own start (where the payoff actually begins
+    # landing), unconditionally, whenever `_find_phrase_span` locates it —
+    # never gated on how close the model's guess already was, since ANY
+    # amount of independent-guess noise is exactly what this removes. Only
+    # falls back to the model's own value when the quote isn't locatable at
+    # all (a paraphrased `why`, or genuinely unquotable content like a
+    # musical payoff with no dialogue to quote — confirmed real case: the
+    # ironmouse clip's `why` never once produced a matchable quote across
+    # repeated trials, so this derivation cannot apply there; its punchline
+    # instability is a structurally different problem, not something this
+    # fix reaches).
     if phrase_span is not None:
         phrase_start, phrase_end = phrase_span
-        drift = _distance_from_span(punchline_at, phrase_start, phrase_end)
-        if drift > PUNCHLINE_DRIFT_TOLERANCE:
-            log.warning(
-                "select: %r punchline_at=%.2f is %.1fs from the quoted payoff's real span "
-                "%.2f-%.2f — correcting to %.2f",
+        if punchline_at != phrase_start:
+            drift = _distance_from_span(punchline_at, phrase_start, phrase_end)
+            log_fn = log.warning if drift > PUNCHLINE_DRIFT_TOLERANCE else log.info
+            log_fn(
+                "select: %r punchline_at=%.2f (model's own guess) replaced with %.2f — the "
+                "quoted payoff's real start (%.1fs away)",
                 hook,
                 punchline_at,
+                phrase_start,
                 drift,
-                phrase_start,
-                phrase_end,
-                phrase_start,
             )
             punchline_at = phrase_start
 
