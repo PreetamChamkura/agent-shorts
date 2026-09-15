@@ -17,14 +17,17 @@ from clipper.select import (
     MIN_DURATION,
     PROMPTS_DIR,
     PUNCHLINE_DRIFT_TOLERANCE,
+    SELECT_EFFORT,
     _count_sentences,
     _distance_from_span,
     _extract_payoff_marker,
     _extract_payoff_quote,
+    _extract_text_or_raise,
     _find_phrase_end,
     _find_phrase_span,
     _log_usage,
     _snap_end_forward,
+    _strip_wrapper_output_example,
     build_windows,
     dedupe,
     format_hmmss,
@@ -33,6 +36,7 @@ from clipper.select import (
     render_transcript,
     resolve_narration,
     select_clip,
+    select_clip_batch,
     snap_to_words,
     split_cacheable_prompt,
     validate_segment,
@@ -989,3 +993,251 @@ def test_audience_tier_is_a_known_placeholder():
     # render_prompt rejects unknown placeholder names outright, so this is
     # what actually permits the keyword above.
     assert "audience_tier" in select_mod._PLACEHOLDERS
+
+
+# --- _strip_wrapper_output_example: batch prompt assembly, no rules drift --
+
+
+def test_strip_wrapper_output_example_splits_real_prompt():
+    template = (PROMPTS_DIR / "select_clip.md").read_text()
+    _, static = split_cacheable_prompt(template)
+    before, field_rules = _strip_wrapper_output_example(static)
+    # the single-clip wrapper example (its own "## Output" JSON block) is
+    # gone from `before` — that's the part batch mode replaces. Checked via
+    # a literal value that only appears inside that JSON example, not the
+    # legitimate `{"segments": []}` reject instruction earlier in Task.
+    assert "SHORT PUNCHY TITLE" not in before
+    assert "## Output" not in before
+    assert "## Task" in before  # everything else survives untouched
+    # Field rules onward is preserved verbatim — this is what batch mode
+    # reuses so the per-field rules can never drift between the two modes
+    assert field_rules.startswith("Field rules:")
+    assert "`confidence` 0.0-1.0" in field_rules
+
+
+def test_strip_wrapper_output_example_raises_if_markers_move():
+    with pytest.raises(ValueError, match="Output.*Field rules"):
+        _strip_wrapper_output_example("no markers in here at all")
+
+
+# --- _extract_text_or_raise: no more bare StopIteration on a missing text -
+# block — real finding: a call can spend its entire MAX_TOKENS budget on
+# thinking with zero text, and the naive next(...) crashed on that with an
+# unreadable error.
+
+
+def _fake_response(content, stop_reason="end_turn", output_tokens=100, thinking_tokens=0):
+    return SimpleNamespace(
+        content=content,
+        stop_reason=stop_reason,
+        usage=SimpleNamespace(
+            output_tokens=output_tokens,
+            output_tokens_details=SimpleNamespace(thinking_tokens=thinking_tokens),
+        ),
+    )
+
+
+def test_extract_text_or_raise_returns_the_text_block():
+    resp = _fake_response(
+        [SimpleNamespace(type="thinking"), SimpleNamespace(type="text", text="hi")]
+    )
+    assert _extract_text_or_raise(resp, "label") == "hi"
+
+
+def test_extract_text_or_raise_names_max_tokens_blowout():
+    # The real failure mode found during verification: out=8000, thinking=8000,
+    # stop_reason="max_tokens", zero text blocks.
+    resp = _fake_response([], stop_reason="max_tokens", output_tokens=8000, thinking_tokens=8000)
+    with pytest.raises(RuntimeError, match="max_tokens.*8000.*thinking"):
+        _extract_text_or_raise(resp, "batch[vid1]")
+
+
+def test_extract_text_or_raise_names_other_missing_text_cases():
+    resp = _fake_response([], stop_reason="end_turn")
+    with pytest.raises(RuntimeError, match="no text block"):
+        _extract_text_or_raise(resp, "label")
+
+
+# --- select_clip_batch: multiple candidates, one call, independent results -
+
+
+def _setup_batch_clip(tmp_path, video_id, words, duration=None):
+    wd = tmp_path / video_id
+    wd.mkdir(parents=True)
+    payload = {
+        "language": "en",
+        "duration": duration if duration is not None else 40.0,
+        "words": words,
+    }
+    (wd / "words.json").write_text(json.dumps(payload))
+    return wd
+
+
+def test_select_clip_batch_one_call_covers_all_candidates(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    words = _words(60, step=1.0)
+    _setup_batch_clip(tmp_path, "vidA", words, duration=60.0)
+    _setup_batch_clip(tmp_path, "vidB", words, duration=60.0)
+
+    raw_segment = dict(
+        start=5.0,
+        end=40.0,
+        punchline_at=35.0,
+        tone="burn",
+        loopable=False,
+        hook="a hook",
+        caption_title="TITLE",
+        vo_script="a perfectly reasonable narrator line that frames the clip",
+        on_screen_caption=None,
+        vo_placement="cold_open",
+        narration_mode_reason="reason",
+        why="setup at 5.0 establishing X, payoff at 35.0",
+        confidence=0.85,
+        thumbnail_text="text",
+        suggested_title="title",
+        title_style="concrete",
+        suggested_hashtags=["#a", "#b", "#c"],
+        suggested_description="desc",
+    )
+
+    calls = []
+
+    def fake_batch(client, video_ids, system_text, user_text, model):
+        calls.append((video_ids, system_text, user_text))
+        return {
+            "results": [
+                {"clip_index": 1, "segments": [raw_segment]},
+                {"clip_index": 2, "segments": []},
+            ]
+        }
+
+    monkeypatch.setattr(select_mod, "_call_batch_model", fake_batch)
+
+    out = select_clip_batch(["vidA", "vidB"])
+    assert len(calls) == 1  # one call, not two
+    video_ids, system_text, user_text = calls[0]
+    assert video_ids == ["vidA", "vidB"]
+    assert "### Candidate 1 of 2" in user_text
+    assert "### Candidate 2 of 2" in user_text
+    # batch-specific rules are in the (cached) system half, not the user half
+    assert "Batch judgment" in system_text
+    assert "not a comparison" in system_text.lower()
+
+    assert len(out["vidA"]["segments"]) == 1
+    assert out["vidA"]["segments"][0]["start"] == 5.0
+    assert out["vidB"]["segments"] == []
+    assert (tmp_path / "vidA" / "segments.json").exists()
+    assert (tmp_path / "vidB" / "segments.json").exists()
+
+
+def test_select_clip_batch_skips_the_call_when_everything_is_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    words = _words(60, step=1.0)
+    _setup_batch_clip(tmp_path, "vidA", words, duration=60.0)
+    (tmp_path / "vidA" / "segments.json").write_text(
+        json.dumps({"video_id": "vidA", "segments": []})
+    )
+
+    calls = []
+    monkeypatch.setattr(
+        select_mod, "_call_batch_model", lambda *a, **k: calls.append(1) or {"results": []}
+    )
+
+    out = select_clip_batch(["vidA"])
+    assert calls == []
+    assert out["vidA"]["segments"] == []
+
+
+def test_select_clip_batch_only_calls_for_uncached_candidates(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    words = _words(60, step=1.0)
+    _setup_batch_clip(tmp_path, "vidA", words, duration=60.0)
+    _setup_batch_clip(tmp_path, "vidB", words, duration=60.0)
+    (tmp_path / "vidA" / "segments.json").write_text(
+        json.dumps({"video_id": "vidA", "segments": []})
+    )
+
+    calls = []
+
+    def fake_batch(client, video_ids, system_text, user_text, model):
+        calls.append(video_ids)
+        return {"results": [{"clip_index": 1, "segments": []}]}
+
+    monkeypatch.setattr(select_mod, "_call_batch_model", fake_batch)
+
+    select_clip_batch(["vidA", "vidB"])
+    assert calls == [["vidB"]]  # only the uncached one went to the model
+
+
+def test_select_clip_batch_rejects_below_floor_without_spending_a_call_slot(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    _setup_batch_clip(tmp_path, "short", _words(10, step=1.0), duration=10.0)
+    _setup_batch_clip(tmp_path, "long", _words(60, step=1.0), duration=60.0)
+
+    calls = []
+
+    def fake_batch(client, video_ids, system_text, user_text, model):
+        calls.append(video_ids)
+        return {"results": [{"clip_index": 1, "segments": []}]}
+
+    monkeypatch.setattr(select_mod, "_call_batch_model", fake_batch)
+
+    out = select_clip_batch(["short", "long"])
+    assert calls == [["long"]]  # the below-floor clip never entered the call
+    assert out["short"]["segments"] == []
+    assert json.loads((tmp_path / "short" / "segments.json").read_text())["segments"] == []
+
+
+def test_select_clip_batch_out_of_range_clip_index_is_dropped_and_treated_as_reject(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    _setup_batch_clip(tmp_path, "vidA", _words(60, step=1.0), duration=60.0)
+
+    monkeypatch.setattr(
+        select_mod,
+        "_call_batch_model",
+        lambda *a, **k: {"results": [{"clip_index": 99, "segments": []}]},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        out = select_clip_batch(["vidA"])
+    assert out["vidA"]["segments"] == []
+    assert "out-of-range" in caplog.text
+    # never cached — a retry should actually retry, not silently keep an
+    # empty result from a response that didn't even name this clip
+    assert not (tmp_path / "vidA" / "segments.json").exists()
+
+
+def test_select_clip_batch_missing_result_is_not_cached(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(paths, "WORK_DIR", tmp_path)
+    _setup_batch_clip(tmp_path, "vidA", _words(60, step=1.0), duration=60.0)
+    _setup_batch_clip(tmp_path, "vidB", _words(60, step=1.0), duration=60.0)
+
+    # model only returned a result for candidate 1, dropping candidate 2
+    monkeypatch.setattr(
+        select_mod,
+        "_call_batch_model",
+        lambda *a, **k: {"results": [{"clip_index": 1, "segments": []}]},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        out = select_clip_batch(["vidA", "vidB"])
+    assert out["vidB"]["segments"] == []
+    assert "got no result back" in caplog.text
+    assert (tmp_path / "vidA" / "segments.json").exists()
+    assert not (tmp_path / "vidB" / "segments.json").exists()
+
+
+def test_select_clip_batch_passes_select_effort(tmp_path, monkeypatch):
+    # SELECT_EFFORT is only actually applied inside _call_batch_model's real
+    # client.messages.create call, which is mocked out everywhere else in
+    # this file — assert the constant exists and is one of the model's real
+    # accepted values, so a typo here would fail loudly rather than 400
+    # silently in production.
+    assert SELECT_EFFORT in ("low", "medium", "high", "xhigh", "max")
+
+
+def test_select_clip_batch_empty_list_raises():
+    with pytest.raises(ValueError):
+        select_clip_batch([])

@@ -79,6 +79,32 @@ log = logging.getLogger("clipper.select")
 MODEL = "claude-opus-5"
 MAX_TOKENS = 8000
 
+# `thinking={"type": "adaptive"}` with no `output_config.effort` set defaults
+# to "high" — that default, left implicit, is what produced the $0.05+
+# blowout calls (real logged thinking usage under the old default ranged
+# 106-1847 tokens across select_clip calls, a 17x spread).
+#
+# `budget_tokens` cannot express a hard cap here: it returns a 400 on
+# claude-opus-5 (removed on this model tier, confirmed against the current
+# model reference) — `effort` is the only lever this model exposes, and it
+# is a depth PREFERENCE, not a ceiling. Confirmed for real, not assumed: even
+# at "medium", one real call still spent its entire MAX_TOKENS budget on
+# thinking (out=8000, thinking=8000, zero text — see _extract_text_or_raise,
+# added because that call crashed the naive StopIteration parse). Medium
+# lowers typical spend (many calls now land in the low hundreds instead of
+# four digits) but does not make a blowout structurally impossible on this
+# model tier — that claim would be false. What medium is verified to do:
+# preserve the same accept/reject verdict as before on 5 of 7 real clips
+# checked against their known outcome under the current tier-aware prompt
+# (see tests/test_select.py's ground-truth regression tests). The other 2
+# flip between accept and reject across repeated real trials regardless of
+# effort or batching — confirmed independent of this change by reproducing
+# it in single-clip mode too (see select_clip_batch's own docstring) — the
+# same near-coin-flip shape CONFIDENCE_FLOOR already has, just triggered by
+# punchline-position noise instead of confidence. Not something this cap
+# introduced or can fix.
+SELECT_EFFORT = "medium"
+
 # Transcript windowing. Big enough to hold a moment plus surrounding context,
 # small enough that the model can actually attend to all of it. The overlap
 # keeps a moment that straddles a boundary from being cut in half; duplicates
@@ -173,69 +199,91 @@ _PLACEHOLDERS = (
 )
 
 # output_config schema — guarantees the response is valid JSON in this shape,
-# so a fenced or chatty reply can't become a parse failure.
-_RESPONSE_SCHEMA = {
+# so a fenced or chatty reply can't become a parse failure. Shared between the
+# single-clip and batch schemas below so the two can never drift apart on
+# what a segment object actually contains.
+_SEGMENT_SCHEMA = {
     "type": "object",
     "properties": {
-        "segments": {
+        "start": {"type": "number"},
+        "end": {"type": "number"},
+        "punchline_at": {"type": "number"},
+        "tone": {"type": "string"},
+        "loopable": {"type": "boolean"},
+        "hook": {"type": "string"},
+        "caption_title": {"type": "string"},
+        "vo_script": {"type": ["string", "null"]},
+        "on_screen_caption": {"type": ["string", "null"]},
+        "vo_placement": {"type": "string"},
+        "narration_mode_reason": {"type": "string"},
+        "why": {"type": "string"},
+        "confidence": {"type": "number"},
+        "thumbnail_text": {"type": "string"},
+        "suggested_title": {"type": "string"},
+        "title_style": {"type": "string"},
+        # No minItems/maxItems — confirmed for real that output_config's
+        # json_schema rejects any array minItems other than 0 or 1 ("'minItems'
+        # values other than 0 or 1 are not supported", a real 400 from a live
+        # call trying [3, 5]). Count (3-5) is enforced as a soft check in
+        # validate_segment instead, same warn-and-keep posture as
+        # thumbnail_text's word count.
+        "suggested_hashtags": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "suggested_description": {"type": "string"},
+    },
+    "required": [
+        "start",
+        "end",
+        "punchline_at",
+        "tone",
+        "loopable",
+        "hook",
+        "caption_title",
+        "vo_script",
+        "on_screen_caption",
+        "vo_placement",
+        "narration_mode_reason",
+        "why",
+        "confidence",
+        "thumbnail_text",
+        "suggested_title",
+        "title_style",
+        "suggested_hashtags",
+        "suggested_description",
+    ],
+    "additionalProperties": False,
+}
+
+_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {"segments": {"type": "array", "items": _SEGMENT_SCHEMA}},
+    "required": ["segments"],
+    "additionalProperties": False,
+}
+
+# select_clip_batch's response: one result per candidate, in the same order
+# submitted. clip_index is 1-based and echoed back by the model so a
+# reordered or dropped result is detectable rather than silently mismatched
+# to the wrong video_id.
+_BATCH_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "start": {"type": "number"},
-                    "end": {"type": "number"},
-                    "punchline_at": {"type": "number"},
-                    "tone": {"type": "string"},
-                    "loopable": {"type": "boolean"},
-                    "hook": {"type": "string"},
-                    "caption_title": {"type": "string"},
-                    "vo_script": {"type": ["string", "null"]},
-                    "on_screen_caption": {"type": ["string", "null"]},
-                    "vo_placement": {"type": "string"},
-                    "narration_mode_reason": {"type": "string"},
-                    "why": {"type": "string"},
-                    "confidence": {"type": "number"},
-                    "thumbnail_text": {"type": "string"},
-                    "suggested_title": {"type": "string"},
-                    "title_style": {"type": "string"},
-                    # No minItems/maxItems — confirmed for real that
-                    # output_config's json_schema rejects any array minItems
-                    # other than 0 or 1 ("'minItems' values other than 0 or 1
-                    # are not supported", a real 400 from a live call trying
-                    # [3, 5]). Count (3-5) is enforced as a soft check in
-                    # validate_segment instead, same warn-and-keep posture
-                    # as thumbnail_text's word count.
-                    "suggested_hashtags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    "suggested_description": {"type": "string"},
+                    "clip_index": {"type": "integer"},
+                    "segments": {"type": "array", "items": _SEGMENT_SCHEMA},
                 },
-                "required": [
-                    "start",
-                    "end",
-                    "punchline_at",
-                    "tone",
-                    "loopable",
-                    "hook",
-                    "caption_title",
-                    "vo_script",
-                    "on_screen_caption",
-                    "vo_placement",
-                    "narration_mode_reason",
-                    "why",
-                    "confidence",
-                    "thumbnail_text",
-                    "suggested_title",
-                    "title_style",
-                    "suggested_hashtags",
-                    "suggested_description",
-                ],
+                "required": ["clip_index", "segments"],
                 "additionalProperties": False,
             },
         }
     },
-    "required": ["segments"],
+    "required": ["results"],
     "additionalProperties": False,
 }
 
@@ -887,14 +935,77 @@ def _call_model(client, video_id: str, system_text: str, user_text: str, model: 
         max_tokens=MAX_TOKENS,
         thinking={"type": "adaptive"},
         system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
-        output_config={"format": {"type": "json_schema", "schema": _RESPONSE_SCHEMA}},
+        output_config={
+            "format": {"type": "json_schema", "schema": _RESPONSE_SCHEMA},
+            "effort": SELECT_EFFORT,
+        },
         messages=[{"role": "user", "content": user_text}],
     )
     _log_usage(video_id, model, response.usage)
     if response.stop_reason == "refusal":
         raise RuntimeError(f"select: model refused the request ({response.stop_details})")
-    text = next(b.text for b in response.content if b.type == "text")
-    return json.loads(text)
+    return json.loads(_extract_text_or_raise(response, f"select({video_id})"))
+
+
+def _extract_text_or_raise(response, label: str) -> str:
+    """The response's text block, or a clear error naming what actually
+    happened — never the bare StopIteration a naive next(...) raises when
+    there isn't one.
+
+    Confirmed for real (not a hypothetical): a call can hit stop_reason
+    "max_tokens" having spent its ENTIRE budget on thinking (a real observed
+    out=8000/thinking=8000, zero text) even at capped effort — effort makes
+    this rarer, it does not make it impossible, because it's a depth
+    preference, not a hard ceiling (see SELECT_EFFORT's own comment: no
+    numeric cap exists on this model tier). That specific case gets its own
+    message because "the model thought itself out of budget" is a
+    structurally different, actionable problem (MAX_TOKENS is too tight for
+    this call) from every other reason a text block might be missing.
+    """
+    for block in response.content:
+        if block.type == "text":
+            return block.text
+    if response.stop_reason == "max_tokens":
+        thinking = (
+            response.usage.output_tokens_details.thinking_tokens
+            if response.usage.output_tokens_details
+            else 0
+        )
+        raise RuntimeError(
+            f"select: {label} hit max_tokens ({response.usage.output_tokens} output tokens, "
+            f"{thinking} of them thinking) before producing any text — MAX_TOKENS={MAX_TOKENS} "
+            "left no room for the actual response"
+        )
+    raise RuntimeError(
+        f"select: {label} returned no text block (stop_reason={response.stop_reason!r})"
+    )
+
+
+def _call_batch_model(
+    client, video_ids: list[str], system_text: str, user_text: str, model: str
+) -> dict:
+    """select_clip_batch's only networked call. Same shape as _call_model,
+    logged distinctly (batch usage vs. single-call usage) since the whole
+    point of batching is that ONE call now covers what used to be N —
+    conflating the two log lines would hide that the cache-write cost is
+    being paid once per batch instead of once per clip.
+    """
+    response = client.messages.create(
+        model=model,
+        max_tokens=MAX_TOKENS,
+        thinking={"type": "adaptive"},
+        system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
+        output_config={
+            "format": {"type": "json_schema", "schema": _BATCH_RESPONSE_SCHEMA},
+            "effort": SELECT_EFFORT,
+        },
+        messages=[{"role": "user", "content": user_text}],
+    )
+    _log_usage(f"batch[{','.join(video_ids)}]", model, response.usage)
+    if response.stop_reason == "refusal":
+        raise RuntimeError(f"select: batch model refused the request ({response.stop_details})")
+    label = f"batch[{','.join(video_ids)}]"
+    return json.loads(_extract_text_or_raise(response, label))
 
 
 def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
@@ -1064,3 +1175,227 @@ def select_clip(video_id: str, *, force: bool = False, model: str = MODEL) -> di
     segments_path.write_text(json.dumps(out, indent=2))
     log.info("select_clip: wrote %d segment(s) to %s", len(collected), segments_path)
     return out
+
+
+def _strip_wrapper_output_example(static_prompt: str) -> tuple[str, str]:
+    """Split select_clip.md's static half into (everything before the
+    single-clip Output section, the "Field rules:" block onward).
+
+    select_clip_batch needs the exact same judgment rules (Task, Narrator
+    commentary, Narration mode, Tone, Loop potential, Thumbnail/upload) and
+    the exact same per-field rules (word counts, what `confidence` means,
+    etc.) — those apply identically per candidate in a batch. The ONLY thing
+    that has to differ is the wrapper: single-clip's `{"segments": [...]}` at
+    the top level vs. batch's `{"results": [{"clip_index": N, "segments":
+    [...]}]}`. Reconstructing the rules text in a second file would risk
+    exactly the stale-instruction drift this project has hit before (see
+    CLAUDE.md's stale-instruction sweep note) — so the batch prompt is built
+    by surgically swapping only the wrapper example, from the one real
+    source file, every time it's assembled.
+    """
+    output_at = static_prompt.find("\n## Output\n")
+    field_rules_at = static_prompt.find("\nField rules:\n")
+    if output_at == -1 or field_rules_at == -1 or field_rules_at < output_at:
+        raise ValueError(
+            "_strip_wrapper_output_example: couldn't find both '## Output' and "
+            "'Field rules:' in prompts/select_clip.md — the batch prompt can't "
+            "be assembled safely without them"
+        )
+    before_output = static_prompt[:output_at]
+    field_rules_onward = static_prompt[field_rules_at + 1 :]  # drop the leading \n
+    return before_output, field_rules_onward
+
+
+def _render_candidate_block(index: int, total: int, video_id: str) -> tuple[str, dict, float]:
+    """One "### Candidate N of M" block for select_clip_batch's user turn,
+    reusing select_clip.md's own per-clip dynamic template — the exact same
+    Source/transcript rendering a single-clip call would use, just labeled
+    and concatenated instead of sent alone.
+
+    Returns (rendered_block, words, clip_duration). Raises FileNotFoundError
+    if this video hasn't been transcribed — same precondition select_clip
+    enforces for a single clip.
+    """
+    wd = work_dir(video_id)
+    words_path = wd / "words.json"
+    if not words_path.exists():
+        raise FileNotFoundError(
+            f"select_clip_batch: {words_path} missing — run stage 2 (transcribe) first."
+        )
+    payload = json.loads(words_path.read_text())
+    words = payload.get("words", [])
+    if not words:
+        raise ValueError(f"select_clip_batch: {words_path} has no words")
+    clip_duration = float(payload.get("duration") or words[-1]["end"])
+
+    template = (PROMPTS_DIR / "select_clip.md").read_text()
+    dynamic_template, _ = split_cacheable_prompt(template)
+    meta = _source_metadata(wd)
+    tier, view_count = resolve_audience_tier(wd)
+
+    block = render_prompt(
+        dynamic_template,
+        window_index="1",
+        window_total="1",
+        window_start=format_hmmss(0.0),
+        window_end=format_hmmss(clip_duration),
+        transcript_window=render_transcript(words),
+        audience_tier=describe_tier(tier, view_count),
+        **meta,
+    )
+    header = f"### Candidate {index} of {total}\n\n"
+    return header + block, words, clip_duration
+
+
+def select_clip_batch(video_ids: list[str], *, force: bool = False, model: str = MODEL) -> dict:
+    """Batched select_clip: judge up to several pre-selected clips in ONE LLM
+    call instead of one call per clip, each judged independently (see
+    prompts/select_clip_batch.md's explicit anti-ranking instruction — this
+    is not "pick the best of N").
+
+    The real cost problem this solves: select_clip's fixed instructions run
+    ~9,300 tokens, cached at $6.25/MTok on write and $0.50/MTok on read
+    (Opus 5). Real measurement this session showed that cache write, not
+    thinking, was landing repeatedly — calls spread minutes apart outlive the
+    ephemeral cache's TTL and each pay the FULL write cost again. Batching N
+    clips into one call pays that write once and amortizes it across all N,
+    the same way a single call already amortizes its own fixed cost across
+    its one candidate — just at a coarser grain.
+
+    Same caching discipline as every other stage: a video_id whose
+    segments.json already exists is skipped and its cached result returned,
+    same as select_clip. Only the video_ids that actually need a call go
+    into the batch — if every video_id is cached, no call happens at all.
+
+    Returns {video_id: {"video_id": ..., "segments": [...]}, ...}, one entry
+    per input video_id, same per-item shape select_clip returns.
+    """
+    if not video_ids:
+        raise ValueError("select_clip_batch: no video_ids given")
+
+    results: dict[str, dict] = {}
+    to_call: list[str] = []
+
+    for video_id in video_ids:
+        wd = work_dir(video_id)
+        segments_path = wd / "segments.json"
+        if segments_path.exists() and not force:
+            log.info(
+                "select_clip_batch: cache hit for %s (%s), skipping the LLM",
+                video_id,
+                segments_path,
+            )
+            results[video_id] = json.loads(segments_path.read_text())
+            continue
+        to_call.append(video_id)
+
+    if not to_call:
+        return results
+
+    blocks: list[str] = []
+    words_by_id: dict[str, list[dict]] = {}
+    below_floor: list[str] = []
+    total = len(to_call)
+    for i, video_id in enumerate(to_call, start=1):
+        block, words, clip_duration = _render_candidate_block(i, total, video_id)
+        if clip_duration < MIN_DURATION:
+            log.warning(
+                "select_clip_batch: %s is %.1fs, under the %.0fs floor — nothing to trim up to, "
+                "rejecting without spending it a slot in the batch call",
+                video_id,
+                clip_duration,
+                MIN_DURATION,
+            )
+            below_floor.append(video_id)
+            continue
+        blocks.append(block)
+        words_by_id[video_id] = words
+
+    # Below-floor candidates never got a rendered block above and are
+    # rejected the same way select_clip rejects them: no model call spent.
+    for video_id in below_floor:
+        out = {"video_id": video_id, "segments": []}
+        (work_dir(video_id) / "segments.json").write_text(json.dumps(out, indent=2))
+        results[video_id] = out
+
+    called_ids = [v for v in to_call if v not in below_floor]
+    if not called_ids:
+        return results
+
+    template = (PROMPTS_DIR / "select_clip.md").read_text()
+    _, static_prompt = split_cacheable_prompt(template)
+    before_output, field_rules_onward = _strip_wrapper_output_example(static_prompt)
+    batch_addendum = (PROMPTS_DIR / "select_clip_batch.md").read_text()
+    # The single-clip Field rules' closing line talks about a top-level
+    # `{"segments": []}` — true in spirit for a batch result too (a rejected
+    # candidate's own "segments" is still []), but the shape is now nested
+    # under that candidate's result object, not the top level. One targeted
+    # swap rather than forking the whole Field rules block over one line.
+    field_rules_onward = field_rules_onward.replace(
+        'Return `{"segments": []}` if the clip doesn\'t qualify.',
+        'That candidate\'s result gets `"segments": []` if it doesn\'t qualify — '
+        "still inside its own result object, per the shape in Output above, "
+        "never by omitting the result entirely.",
+    )
+    batch_static_prompt = before_output.rstrip() + "\n\n" + batch_addendum + field_rules_onward
+
+    user_prompt = "\n\n".join(blocks)
+
+    import anthropic  # imported lazily so the pure helpers stay import-light
+
+    client = anthropic.Anthropic()
+
+    log.info(
+        "select_clip_batch: %d candidate(s) (%s) -> 1 LLM call to %s",
+        len(called_ids),
+        ", ".join(called_ids),
+        model,
+    )
+    response = _call_batch_model(client, called_ids, batch_static_prompt, user_prompt, model)
+    raw_results = response.get("results", [])
+
+    seen_indices: set[int] = set()
+    for raw_result in raw_results:
+        clip_index = raw_result.get("clip_index")
+        if not isinstance(clip_index, int) or not (1 <= clip_index <= len(called_ids)):
+            log.warning(
+                "select_clip_batch: result has out-of-range clip_index=%r for %d candidate(s) "
+                "— dropped",
+                clip_index,
+                len(called_ids),
+            )
+            continue
+        if clip_index in seen_indices:
+            log.warning(
+                "select_clip_batch: duplicate clip_index=%d — later result dropped", clip_index
+            )
+            continue
+        seen_indices.add(clip_index)
+
+        video_id = called_ids[clip_index - 1]
+        words = words_by_id[video_id]
+        raw_segments = raw_result.get("segments", [])
+
+        collected: list[dict] = []
+        for raw in raw_segments:
+            seg = validate_segment(raw, words)
+            if seg is not None:
+                collected.append(seg)
+        for n, seg in enumerate(collected):
+            seg["n"] = n
+
+        out = {"video_id": video_id, "segments": collected}
+        (work_dir(video_id) / "segments.json").write_text(json.dumps(out, indent=2))
+        log.info("select_clip_batch: wrote %d segment(s) for %s", len(collected), video_id)
+        results[video_id] = out
+
+    missing = [v for i, v in enumerate(called_ids, start=1) if i not in seen_indices]
+    for video_id in missing:
+        log.warning(
+            "select_clip_batch: %s got no result back from the model — treating as reject, "
+            "not caching (so a re-run retries it rather than silently sticking with empty)",
+            video_id,
+        )
+        results[video_id] = {"video_id": video_id, "segments": []}
+
+    return results
