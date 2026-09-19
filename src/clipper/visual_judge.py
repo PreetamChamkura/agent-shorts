@@ -54,11 +54,16 @@ log = logging.getLogger("clipper.visual_judge")
 JUDGE_MODEL = "claude-sonnet-5"
 MAX_TOKENS = 4096
 
-N_SAMPLE_FRAMES = 5
+# Cost-priority reduction from 5 (project is self-funded, prior spend wasn't
+# sustainable — no comparison eval run first, by explicit instruction).
+# Image tokens scale with frame count, so this cuts roughly 2/5 of this
+# call's real image cost directly. Rest of the layer's logic (composition
+# detection, best-frame selection, the prompt itself) is unchanged.
+N_SAMPLE_FRAMES = 3
 
 # Half of the real 1080x1920 output. Judging composition and motion doesn't
 # need full resolution, and this keeps image tokens down — roughly
-# (540*960)/750 ~= 690 tokens/frame, ~3.5k tokens total for 5 frames.
+# (540*960)/750 ~= 690 tokens/frame, ~2.1k tokens total for 3 frames.
 PREVIEW_WIDTH = 540
 PREVIEW_HEIGHT = 960
 
@@ -247,7 +252,7 @@ def _call_model(
 
     ``prompt`` goes in a cached `system` block, not the user turn: real
     measurement shows this text varies only by composition (2 real values)
-    and occasionally by frame count (almost always 5) — effectively
+    and occasionally by frame count (almost always N_SAMPLE_FRAMES) — effectively
     constant, not genuinely per-clip data — so it caches at ~0.1x on every
     call after the first with the same composition. Only the real,
     genuinely-unique-per-clip images go in the user turn, where they can
@@ -342,9 +347,9 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
         "visual_judge: %s audience tier %s — %s",
         video_id,
         describe_tier(tier, view_count),
-        "judging on recognition, not cold-viewer appeal"
+        "lowered visual bar (one clear moment suffices)"
         if tier == TIER_HIGH
-        else "judging as a cold viewer would",
+        else "full visual bar (sustained interest required)",
     )
 
     import anthropic  # imported lazily so the pure helpers stay import-light
@@ -417,8 +422,8 @@ def judge_clip(video_id: str, *, model: str = JUDGE_MODEL, force: bool = False) 
         "frames_sampled": len(frame_paths),
         "best_frame_timestamp": best_frame_timestamp,
         "best_frame_reason": best_frame_reason,
-        # Recorded, not just used: a verdict reached under the recognition bar
-        # is a different judgment from one reached under the cold-viewer bar,
+        # Recorded, not just used: a verdict reached under the lowered HIGH
+        # bar is a different judgment from one reached under the full bar,
         # and six months from now the cached json is the only place that says
         # which was applied.
         "audience_tier": tier,

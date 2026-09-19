@@ -76,8 +76,9 @@ def test_sample_timestamps_spans_range_with_edge_inset():
     assert ts == sorted(ts)
 
 
-def test_sample_timestamps_default_count_is_five():
-    assert N_SAMPLE_FRAMES == 5
+def test_sample_timestamps_default_count_is_three():
+    # Cost-priority reduction from 5 — see N_SAMPLE_FRAMES's own comment.
+    assert N_SAMPLE_FRAMES == 3
 
 
 def test_sample_timestamps_single_is_midpoint():
@@ -681,3 +682,38 @@ def test_judge_clip_tier_does_not_change_the_cached_system_prompt(tmp_path, monk
     # per-call half only need to name which one applies.
     assert "STANDARD" in prompt
     assert "HIGH" in prompt
+
+
+# --- HIGH tier LOWERS the visual bar, it does not remove it ----------------
+# Real posted results after the first HIGH-tier design (which said "do not
+# reject for low motion or static framing alone"): 1-2 views on two clips and
+# 36% retention on a third — ~94% of this channel's traffic is cold feed to
+# non-subscribers, for whom recognition only works if a stranger identifies
+# the subject instantly. These pin the corrected wording so the all-or-nothing
+# phrasing can't quietly come back.
+
+
+def test_visual_judge_prompt_high_tier_keeps_a_minimum_bar():
+    prompt = _build_prompt("tight_crop", 3)
+    assert "at least one clear moment of visible interest" in prompt
+    assert "still a reject" in prompt  # a famous source that fails the minimum
+
+
+def test_visual_judge_prompt_no_longer_says_static_is_not_a_reject_on_high():
+    prompt = _build_prompt("tight_crop", 3)
+    assert "do not reject a HIGH-tier clip for low motion" not in prompt
+    assert "is a pass on this tier" not in prompt
+    assert "Recognition carries footage" not in prompt
+
+
+def test_visual_judge_prompt_names_cold_traffic_as_the_real_audience():
+    prompt = _build_prompt("tight_crop", 3)
+    assert "cold feed distribution" in prompt
+    assert "do not assume the viewer knows who this is" in prompt
+
+
+def test_visual_judge_prompt_tie_break_only_leans_pass_once_minimum_is_met():
+    prompt = _build_prompt("tight_crop", 3)
+    # the old rule was "when genuinely unsure on HIGH, pass" unconditionally
+    assert "when genuinely unsure on HIGH, pass" not in prompt
+    assert "no such moment at all" in prompt
