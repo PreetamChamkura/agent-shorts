@@ -76,34 +76,27 @@ from .styles import style_for_tone
 
 log = logging.getLogger("clipper.select")
 
-MODEL = "claude-opus-5"
+MODEL = "claude-opus-5"  # select()'s long-form path — unchanged, not in scope
 MAX_TOKENS = 8000
 
-# `thinking={"type": "adaptive"}` with no `output_config.effort` set defaults
-# to "high" — that default, left implicit, is what produced the $0.05+
-# blowout calls (real logged thinking usage under the old default ranged
-# 106-1847 tokens across select_clip calls, a 17x spread).
-#
-# `budget_tokens` cannot express a hard cap here: it returns a 400 on
-# claude-opus-5 (removed on this model tier, confirmed against the current
-# model reference) — `effort` is the only lever this model exposes, and it
-# is a depth PREFERENCE, not a ceiling. Confirmed for real, not assumed: even
-# at "medium", one real call still spent its entire MAX_TOKENS budget on
-# thinking (out=8000, thinking=8000, zero text — see _extract_text_or_raise,
-# added because that call crashed the naive StopIteration parse). Medium
-# lowers typical spend (many calls now land in the low hundreds instead of
-# four digits) but does not make a blowout structurally impossible on this
-# model tier — that claim would be false. What medium is verified to do:
-# preserve the same accept/reject verdict as before on 5 of 7 real clips
-# checked against their known outcome under the current tier-aware prompt
-# (see tests/test_select.py's ground-truth regression tests). The other 2
-# flip between accept and reject across repeated real trials regardless of
-# effort or batching — confirmed independent of this change by reproducing
-# it in single-clip mode too (see select_clip_batch's own docstring) — the
-# same near-coin-flip shape CONFIDENCE_FLOOR already has, just triggered by
-# punchline-position noise instead of confidence. Not something this cap
-# introduced or can fix.
-SELECT_EFFORT = "medium"
+# Cost is the explicit priority over selection quality for select_clip
+# specifically (project is self-funded, prior spend wasn't sustainable —
+# real numbers in the batching/effort-cap history above). Switched from
+# claude-opus-5 to claude-sonnet-5 with no comparison eval first, by
+# explicit instruction: whatever quality difference this brings is accepted,
+# not measured before shipping. Scoped to select_clip/select_clip_batch
+# only — MODEL above (select()'s long-form path) is untouched, since that
+# wasn't part of what was asked.
+SELECT_CLIP_MODEL = "claude-sonnet-5"
+
+# Thinking is DISABLED outright for select_clip's call, not just capped —
+# unlike claude-opus-5 (where budget_tokens 400s and effort is only ever a
+# depth preference, confirmed for real to still blow the full token budget
+# even at "medium"), claude-sonnet-5 accepts thinking={"type": "disabled"},
+# an actual hard zero rather than a lower preference. Thinking tokens were
+# the single biggest driver of every real blowout logged so far, so this is
+# the strongest available lever, not a compromise one.
+SELECT_EFFORT = "medium"  # select()'s long-form path only; select_clip disables thinking entirely
 
 # Transcript windowing. Big enough to hold a moment plus surrounding context,
 # small enough that the model can actually attend to all of it. The overlap
@@ -940,7 +933,15 @@ def _source_metadata(wd) -> dict:
     }
 
 
-def _call_model(client, video_id: str, system_text: str, user_text: str, model: str) -> dict:
+def _call_model(
+    client,
+    video_id: str,
+    system_text: str,
+    user_text: str,
+    model: str,
+    *,
+    disable_thinking: bool = False,
+) -> dict:
     """The only networked call in this module. Returns the parsed JSON object.
 
     ``system_text`` is the prompt's fixed instructions (from
@@ -949,16 +950,27 @@ def _call_model(client, video_id: str, system_text: str, user_text: str, model: 
     reads it at ~0.1x instead of paying full price again. ``user_text`` is
     the real per-call Source/transcript data, which can never cache since
     it's unique every time.
+
+    ``disable_thinking`` is select_clip's cost-priority path (SELECT_EFFORT's
+    comment): claude-sonnet-5 accepts thinking={"type": "disabled"}, a real
+    hard zero. select()'s long-form path leaves this False and keeps
+    adaptive thinking at SELECT_EFFORT, unchanged — not in scope for the
+    cost-priority switch. ``effort`` is only meaningful when thinking is on,
+    so it's omitted entirely when disabled rather than sent alongside a
+    setting it can't affect.
     """
+    output_config: dict = {"format": {"type": "json_schema", "schema": _RESPONSE_SCHEMA}}
+    if disable_thinking:
+        thinking: dict = {"type": "disabled"}
+    else:
+        thinking = {"type": "adaptive"}
+        output_config["effort"] = SELECT_EFFORT
     response = client.messages.create(
         model=model,
         max_tokens=MAX_TOKENS,
-        thinking={"type": "adaptive"},
+        thinking=thinking,
         system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
-        output_config={
-            "format": {"type": "json_schema", "schema": _RESPONSE_SCHEMA},
-            "effort": SELECT_EFFORT,
-        },
+        output_config=output_config,
         messages=[{"role": "user", "content": user_text}],
     )
     _log_usage(video_id, model, response.usage)
@@ -1009,16 +1021,19 @@ def _call_batch_model(
     point of batching is that ONE call now covers what used to be N —
     conflating the two log lines would hide that the cache-write cost is
     being paid once per batch instead of once per clip.
+
+    select_clip_batch is exclusively part of the cost-priority select_clip
+    path (there is no long-form batch entry point), so thinking is always
+    disabled here — same real hard zero as _call_model's disable_thinking,
+    not a parameter, because this call site has no other caller that would
+    ever need it on.
     """
     response = client.messages.create(
         model=model,
         max_tokens=MAX_TOKENS,
-        thinking={"type": "adaptive"},
+        thinking={"type": "disabled"},
         system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
-        output_config={
-            "format": {"type": "json_schema", "schema": _BATCH_RESPONSE_SCHEMA},
-            "effort": SELECT_EFFORT,
-        },
+        output_config={"format": {"type": "json_schema", "schema": _BATCH_RESPONSE_SCHEMA}},
         messages=[{"role": "user", "content": user_text}],
     )
     _log_usage(f"batch[{','.join(video_ids)}]", model, response.usage)
@@ -1109,7 +1124,7 @@ def select(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
     return out
 
 
-def select_clip(video_id: str, *, force: bool = False, model: str = MODEL) -> dict:
+def select_clip(video_id: str, *, force: bool = False, model: str = SELECT_CLIP_MODEL) -> dict:
     """Stage 3 variant for a single pre-selected clip (Twitch clips — CLAUDE.md
     step 2b), not a long-form video. No window-hunting: one LLM call against
     prompts/select_clip.md over the clip's entire transcript, whose boundaries
@@ -1179,7 +1194,9 @@ def select_clip(video_id: str, *, force: bool = False, model: str = MODEL) -> di
         describe_tier(tier, view_count),
         model,
     )
-    response = _call_model(client, video_id, static_prompt, user_prompt, model)
+    response = _call_model(
+        client, video_id, static_prompt, user_prompt, model, disable_thinking=True
+    )
     raw_segments = response.get("segments", [])
 
     collected: list[dict] = []
@@ -1267,7 +1284,9 @@ def _render_candidate_block(index: int, total: int, video_id: str) -> tuple[str,
     return header + block, words, clip_duration
 
 
-def select_clip_batch(video_ids: list[str], *, force: bool = False, model: str = MODEL) -> dict:
+def select_clip_batch(
+    video_ids: list[str], *, force: bool = False, model: str = SELECT_CLIP_MODEL
+) -> dict:
     """Batched select_clip: judge up to several pre-selected clips in ONE LLM
     call instead of one call per clip, each judged independently (see
     prompts/select_clip_batch.md's explicit anti-ranking instruction — this

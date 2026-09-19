@@ -823,7 +823,7 @@ def test_select_clip_calls_model_once_and_validates(tmp_path, monkeypatch):
     monkeypatch.setattr(
         select_mod,
         "_call_model",
-        lambda client, video_id, system_text, user_text, model: calls.append(
+        lambda client, video_id, system_text, user_text, model, **kw: calls.append(
             (system_text, user_text)
         )
         or {"segments": [raw_segment]},
@@ -992,7 +992,7 @@ def _select_clip_capturing_prompt(tmp_path, monkeypatch, info=None):
     monkeypatch.setattr(
         select_mod,
         "_call_model",
-        lambda client, video_id, system_text, user_text, model: calls.append(
+        lambda client, video_id, system_text, user_text, model, **kw: calls.append(
             (system_text, user_text)
         )
         or {"segments": []},
@@ -1032,7 +1032,7 @@ def test_both_tiers_rules_live_in_the_cached_half(tmp_path, monkeypatch):
     assert "**STANDARD**" in system_text
     assert "**HIGH**" in system_text
     # the HIGH-tier narrator guidance is fixed text and belongs here too
-    assert "lean into the recognition" in system_text
+    assert "supply the context instead of manufacturing a mystery" in system_text
 
 
 def test_audience_tier_is_a_known_placeholder():
@@ -1287,3 +1287,140 @@ def test_select_clip_batch_passes_select_effort(tmp_path, monkeypatch):
 def test_select_clip_batch_empty_list_raises():
     with pytest.raises(ValueError):
         select_clip_batch([])
+
+
+# --- _call_model / _call_batch_model: thinking disabled for cost priority -
+# select_clip's cost-priority switch (claude-sonnet-5, thinking disabled
+# outright rather than capped via effort) — local, no network, exercising
+# the actual request construction rather than mocking _call_model away, so
+# a wrong keyword here fails a free test instead of a real paid 400.
+
+
+class _FakeMessages:
+    def __init__(self):
+        self.last_kwargs = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text='{"segments": []}')],
+            stop_reason="end_turn",
+            usage=_fake_usage(),
+        )
+
+
+class _FakeClient:
+    def __init__(self):
+        self.messages = _FakeMessages()
+
+
+def test_call_model_disables_thinking_when_requested():
+    client = _FakeClient()
+    select_mod._call_model(
+        client, "vid1", "system", "user", "claude-sonnet-5", disable_thinking=True
+    )
+    kwargs = client.messages.last_kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert "effort" not in kwargs["output_config"]
+
+
+def test_call_model_keeps_adaptive_thinking_by_default():
+    client = _FakeClient()
+    select_mod._call_model(client, "vid1", "system", "user", "claude-opus-5")
+    kwargs = client.messages.last_kwargs
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["output_config"]["effort"] == SELECT_EFFORT
+
+
+def test_call_batch_model_always_disables_thinking():
+    client = _FakeClient()
+    select_mod._call_batch_model(client, ["vid1"], "system", "user", "claude-sonnet-5")
+    kwargs = client.messages.last_kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert "effort" not in kwargs["output_config"]
+
+
+def test_select_clip_model_default_is_sonnet():
+    # The production model for the cost-priority path — a wrong default here
+    # silently reverts to the expensive model with no error.
+    import inspect
+
+    default = inspect.signature(select_mod.select_clip).parameters["model"].default
+    assert default == "claude-sonnet-5"
+
+
+def test_select_clip_batch_model_default_is_sonnet():
+    import inspect
+
+    assert (
+        inspect.signature(select_mod.select_clip_batch).parameters["model"].default
+        == "claude-sonnet-5"
+    )
+
+
+# --- HIGH tier LOWERS the spoken-beat bar, it does not remove it -----------
+# Same correction as Layer 3's visual bar (tests/test_visual_judge.py), for
+# the same reason and from the same real evidence: the first HIGH-tier design
+# dropped the locatable-beat requirement outright on the theory that
+# recognition substitutes for narrative structure. Real posted results
+# disproved it — the Ironmouse clip (an unbroken sung performance, no turn
+# anywhere in its transcript) shipped under that rule and held 36.3% of its
+# viewers, against ~94% cold Shorts-feed traffic. These pin the corrected
+# wording so the all-or-nothing phrasing can't quietly return.
+
+
+def _select_clip_prompt() -> str:
+    return (PROMPTS_DIR / "select_clip.md").read_text()
+
+
+def test_high_tier_keeps_a_minimum_locatable_moment():
+    p = _select_clip_prompt()
+    assert "at least one locatable moment" in p
+    assert "still `{\"segments\": []}`, however large the source audience" in p
+
+
+def test_high_tier_no_longer_drops_the_beat_requirement():
+    p = _select_clip_prompt()
+    assert "recognition substitutes for a strict setup-to-payoff structure" not in p
+    assert '"No coherent beat" alone is no longer grounds' not in p
+    assert "The locatable-spoken-beat requirement." not in p
+
+
+def test_high_tier_names_cold_traffic_as_the_real_audience():
+    p = _select_clip_prompt()
+    assert "cold feed distribution" in p
+    assert "do not assume the viewer arrives already knowing who this is" in p
+    assert "modest discount" in p
+
+
+def test_high_tier_has_both_locatability_checks():
+    # "Can you point at it" catches "the whole clip is the bit"; "same second
+    # twice" catches a peak asserted inside continuous content — the exact
+    # failure the Ironmouse punchline spread (23.5s-40.0s on one 28s segment)
+    # demonstrated for real.
+    p = _select_clip_prompt()
+    assert "Can you point at it?" in p
+    assert "Would you name the same second twice?" in p
+    assert "it builds throughout" in p
+
+
+def test_running_bit_reject_no_longer_inverts_on_high():
+    p = _select_clip_prompt()
+    assert "**this one inverts on HIGH.**" not in p
+    assert "softens but does not invert" in p
+
+
+def test_no_coherent_beat_is_grounds_on_both_tiers():
+    p = _select_clip_prompt()
+    assert "(on STANDARD) has no coherent beat" not in p
+    assert "the bar differs by tier, its existence does not" in p
+
+
+def test_high_tier_narrator_guidance_does_not_assume_shared_context():
+    # Left unfixed, this directly contradicted the tier section above it —
+    # the stale-instruction collision this project has hit repeatedly.
+    p = _select_clip_prompt()
+    assert "that reason already exists in the viewer's head" not in p
+    assert "lean into the recognition" not in p
+    assert "never watched this creator, and it should still land" in p
+    assert "An in-joke reference is not context." in p
