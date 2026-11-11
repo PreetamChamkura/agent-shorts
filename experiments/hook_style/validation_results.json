@@ -1,0 +1,97 @@
+{
+  "settings": {
+    "sims_per_cell": 10000,
+    "n_per_arm": 26,
+    "mde_points": 10.0,
+    "planning_sd": 12.0,
+    "alpha": 0.05,
+    "bootstrap_resamples_in_sim": 1000,
+    "seed": 20261111,
+    "numpy": "2.5.2",
+    "scipy": "1.18.1",
+    "python": "3.13.12",
+    "runtime_seconds": 62.6,
+    "date": "2026-11-11"
+  },
+  "inference": {
+    "normal": {
+      "H0 (no effect)": {
+        "welch_reject": 0.047,
+        "mwu_reject": 0.0469,
+        "ci_excludes_zero": 0.0631,
+        "decide_ship": 0.0182,
+        "decide_keep": 0.0188,
+        "ci_coverage": 0.9369,
+        "mean_ci_width": 12.657201215456205
+      },
+      "H1 (+10 pts)": {
+        "welch_reject": 0.8364,
+        "mwu_reject": 0.8141,
+        "ci_excludes_zero": 0.8582,
+        "decide_ship": 0.8007,
+        "decide_keep": 0.0,
+        "ci_coverage": 0.9386,
+        "mean_ci_width": 12.654444816318962
+      }
+    },
+    "skewed-bounded": {
+      "H0 (no effect)": {
+        "welch_reject": 0.0516,
+        "mwu_reject": 0.0493,
+        "ci_excludes_zero": 0.0627,
+        "decide_ship": 0.021,
+        "decide_keep": 0.0199,
+        "ci_coverage": 0.9372,
+        "mean_ci_width": 12.672482333931137
+      },
+      "H1 (+10 pts)": {
+        "welch_reject": 0.8389,
+        "mwu_reject": 0.8142,
+        "ci_excludes_zero": 0.8586,
+        "decide_ship": 0.8031,
+        "decide_keep": 0.0,
+        "ci_coverage": 0.9423,
+        "mean_ci_width": 12.700381059672386
+      }
+    }
+  },
+  "srm": {
+    "fair 50/50": {
+      "p<.001": 0.00055,
+      "p<.01": 0.0086,
+      "p<.05": 0.03665
+    },
+    "60/40": {
+      "p<.001": 0.01725,
+      "p<.01": 0.11365,
+      "p<.05": 0.2648
+    },
+    "70/30": {
+      "p<.001": 0.26825,
+      "p<.01": 0.61865,
+      "p<.05": 0.8109
+    },
+    "80/20": {
+      "p<.001": 0.86025,
+      "p<.01": 0.97755,
+      "p<.05": 0.9957
+    }
+  },
+  "randomization_balance": {
+    "simple_randomization": {
+      "4": 0.6778086391424605,
+      "6": 0.48845566937989204,
+      "8": 0.3317497633694906,
+      "10": 0.21160856876151612
+    },
+    "permuted_blocks_max_imbalance": 2
+  },
+  "power_if_planning_sd_is_wrong": {
+    "8": 0.9930313529344577,
+    "10": 0.9424302825159362,
+    "12": 0.8380525894774417,
+    "15": 0.6544612680203774,
+    "18": 0.5018709988134876,
+    "22": 0.36239829818600233
+  }
+}

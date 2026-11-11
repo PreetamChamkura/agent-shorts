@@ -85,6 +85,24 @@ uv run clipper review VIDEO_ID
 
 Run `uv run clipper --help` (or `<subcommand> --help`) for the full flag list.
 
+## Experimentation
+
+The pipeline has a small pre-registered A/B framework: a YAML feature flag, seeded permuted-block
+randomization with an append-only assignment log, and an analysis (Welch, Mann-Whitney, bootstrap CI,
+sample-ratio and attrition diagnostics) whose decision rule is fixed in advance. The first experiment
+(question vs. statement hook line) is pre-registered in
+[`experiments/hook_style/PREREGISTRATION.md`](experiments/hook_style/PREREGISTRATION.md) and not yet
+launched. Its power calculation shows that detecting a 10-point shift needs ~52 measured clips, which at a
+few clips per week is months, not weeks. The analysis code is validated by Monte Carlo simulation in
+[`validation_report.md`](experiments/hook_style/validation_report.md).
+
+```bash
+uv run clipper experiment power            # sample size and calendar time
+uv run clipper experiment status           # flag state, funnel, what is due
+uv run clipper experiment verify           # recompute every assignment from the seed
+uv run clipper experiment analyze          # apply the pre-registered analysis, write the memo
+```
+
 ## Development
 
 ```bash

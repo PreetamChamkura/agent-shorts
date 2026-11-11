@@ -156,7 +156,7 @@ This works with the rules below, not instead of them — still no hype, still no
 - Present tense
 - Never describe what is visibly happening. The viewer has eyes. Add what they can't see: context, history, stakes, what happened next
 - Never open with "POV", "wait for it", "this is insane", "he cooked", or any variant. If the line could sit on any clip, it's a bad line
-- No questions to the audience, no calls to action
+- No questions to the audience, no calls to action — with one deliberate, experiment-scoped exception: while the pre-registered `hook_style` experiment is `active`, clips randomized into its `question` arm get a question-form hook line (see A/B experiments)
 - One joke maximum, only if it lands. A flat factual setup beats a bad punchline
 - Never explain the joke that's coming. Set up, then get out
 - Mild profanity at most; advertiser-friendly by default
@@ -462,6 +462,8 @@ Static grid-thumbnail image and upload text, generated stage-4-adjacent per clip
 
 Do not build: publishing/upload code, scheduling, analytics ingestion, automated compilations, face tracking, or a hosted web app. Ask first.
 
+**One deliberately narrow exception, requested explicitly:** the A/B experiment framework (`experiments/`, `clipper.experiment*`, `clipper.stats`) reads YouTube Studio numbers that a human types into `outcomes.csv`. It never calls the YouTube API or any platform, and there is still no publishing code. A live Analytics-API client was not built: it would need the owner's OAuth credentials, could not be tested here, and it is not established that the API even exposes Studio's *viewed vs. swiped away* metric (that is why the CSV path is the primary one).
+
 Automated compilations specifically are off the table — they're the most-cited example of reused content and a compilation of reuploads is the worst possible artifact to hand a policy reviewer.
 
 ## Model switching
@@ -512,6 +514,28 @@ pre-emptively.
 This fix has a real, confirmed limit, and it's the exact clip that motivated it: the ironmouse singing clip (26.0/28.5/38.0/40.0 variance) never once produces a quotable `why` across 8 combined real trials (4 before this fix, 4 after) — it's musical content with no dialogue to quote, so `_extract_payoff_quote` always returns `None` and the derivation structurally cannot fire. Its punchline instability is unresolved and is a different problem from the one this fix addresses — nothing to quote-match against, not insufficient correction logic. A `PUNCHLINE_BORDERLINE_MARGIN`-style visibility log (mirroring `CONFIDENCE_BORDERLINE_MARGIN` below) for the remaining un-derivable cases would be the natural next step, not yet built.
 
 **Real cost, not estimated:** a real batch-of-5 call cost $0.166 and published 0 clips (0/5 accepted in that specific run — consistent with the roughly 1-in-5 HIGH-tier accept rate already observed, not evidence of a new problem). A real batch-of-2 call that included 1 real accept cost $0.034 for that accept. These are two different real numbers answering two different questions, not massaged into one figure — a clean "cost per published clip" needs a clean run with an accept in it, and today's two real batches split that way by chance, not by cherry-picking after the fact.
+
+## A/B experiments
+
+Pre-registered, randomized tests of one pipeline change at a time, in `experiments/<name>/`: `config.yaml` (the feature flag), `PREREGISTRATION.md`, append-only `assignments.jsonl` and `selection_outcomes.jsonl`, hand-entered `outcomes.csv`, `analysis.ipynb`, and a Monte Carlo `validate_analysis.py` with its `validation_report.md`. Code: `clipper.experiment` (flag + randomization, stdlib + pyyaml only — selection imports it), `clipper.stats` and `clipper.experiment_analysis` (numpy/scipy, optional `experiment` dependency group), `clipper experiment status|verify|power|analyze`.
+
+**The flag has three states.** `preregistered`: the pipeline ignores the config entirely and behaves exactly as before. `active`: new eligible clips are randomized. `frozen`: nobody new is enrolled, existing clips keep their arm. Launching is one commit flipping `status` and setting `launch_date`. Only one experiment may be active or frozen at a time (two would contaminate each other's clips).
+
+**Assignment** is the k-th element of a seeded permuted-block sequence (`arm_at`), made at the first `select_clip`/`select_clip_batch` call for a clip that is STANDARD tier and actually reaches the model (a clip under the 18s floor is rejected without a call and does not take a slot). It is **idempotent** — a forced re-selection can never re-roll a clip — and each record carries `prereg_sha256` and `design_sha256`, so `clipper experiment verify` can recompute every arm from the seed and detect a flipped arm, a duplicate, an index gap, or an edit to the pre-registration or design block after launch. The committed seed's first 16 assignments are pinned by a golden test: changing the algorithm mid-experiment would silently re-define what "the k-th clip's arm" means. The arm reaches the model as a per-clip `Hook style:` line, with the rules in the cached half of `select_clip.md` (the cache is not forked); `segments.json` gets an `experiment` stamp, and selection logs accept/reject, the hook line, mechanical compliance (a `?` ends the line iff the question arm), and whether the title happens to be a question.
+
+**Tests never touch the real logs:** `tests/conftest.py` points every test at an empty experiments dir. Keep it that way — selection writes to these logs whenever an experiment is active.
+
+### The `hook_style` experiment (question vs. statement hook line)
+
+Pre-registered 2026-11-11 and **not launched** (`status: preregistered`). Primary metric: Studio's *stayed to watch* % at 7 days (3-second retention is not a metric Studio exposes). Powered to detect 10 points; the pre-registration commits to the analysis, the decision rule, and the diagnostics that can veto it.
+
+- **The power calculation says "3-4 weeks of data" is not achievable.** 24 clips per arm for the t-test, 26 if the rank test must carry the power (52 measured clips). That is about **19 weeks at 3 clips/week, 29 at 2, 58 at 1**; inside the 26-week cap it reaches planned n only at roughly 3+ clips/week. The planning SD (12 points) rests on two real clips, so a blinded re-estimate after 16 measured clips may raise (never lower) the planned n.
+- **The re-estimate uses the *adjusted* one-sample variance estimator.** The plain pooled SD is inflated by the very effect being tested; with the true effect equal to the MDE it would demand ~19% more clips though nothing had gone wrong. Found by the tests, fixed before launch.
+- **The decision rule is conservative on purpose:** ship only if Welch, Mann-Whitney, and the bootstrap CI all agree and no diagnostic fired. `validation_report.md` measures what that costs in power. A sample-ratio mismatch withholds the decision entirely.
+- **The p<.001 SRM alarm has low sensitivity to moderate imbalance at this n** (borrowed from large online experiments); retained as pre-registered, with differential-attrition and acceptance diagnostics (Fisher, p<.01) as the working guards. See the validation report for the measured rates.
+- **Enrolment happens at selection, so acceptance is post-assignment.** If the question prompt changes how often clips are accepted, the surviving clips are a selected subset — hence the acceptance-by-arm diagnostic. A single real smoke call (not a result) showed the question arm producing a compliant question hook, and one clip rejected in the statement arm that an older prompt had accepted; one draw cannot say whether requiring a hook line suppresses acceptance, which is exactly what the diagnostic will measure at scale.
+- **The question arm deliberately breaks the persona's "no questions" rule** for the hook line only; every other persona rule still applies.
+- **Not blinded** (the poster knows each clip's arm), single channel, low volume: only large effects are detectable, and a null means "no effect of 10 points or more was detected," not "no effect."
 
 ## Known issues
 
