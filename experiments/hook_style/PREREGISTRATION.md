@@ -68,7 +68,7 @@ Computed with `clipper.stats.n_per_arm` (exact noncentral-t power; validated aga
 
 **Stop rule:** stop at **26 measured clips per arm, or 26 weeks after `launch_date`, whichever comes first.** The analysis is run **once**, at the stop. There are **no interim looks at the treatment effect.**
 
-**Blinded sample-size re-estimate (the only interim).** When the first 16 clips have a measured outcome, compute the SD of `stayed_to_watch_pct` pooled across arms, *without looking at arm*, and recompute n once with `clipper.stats.n_per_arm`. The planned n may be raised, never lowered, and the 26-week cap does not move. If n is raised past what the cap allows, the experiment is reported as underpowered.
+**Blinded sample-size re-estimate (the only interim).** When the first 16 clips have a measured outcome, estimate the within-arm SD of `stayed_to_watch_pct` *without looking at arm*, and recompute n once with `clipper.stats.n_per_arm`. The estimator is the pooled SD adjusted for the variance the assumed 10-point effect contributes (`clipper.stats.blinded_adjusted_sd`; without that adjustment a true effect equal to the MDE would inflate the estimate and ask for ~19% more clips even when nothing had gone wrong). The planned n may be raised, never lowered, and the 26-week cap does not move. If n is raised past what the cap allows, the experiment is reported as underpowered.
 
 ## 6. Analysis plan
 
@@ -91,7 +91,7 @@ A non-significant result at planned n means *no effect of 10 points or more was 
 **Diagnostics (checked before any decision is allowed):**
 
 - **Sample-ratio mismatch** — exact binomial test of the analysed arm counts against 1:1. p < 0.001 ⇒ **design integrity failure, no decision.**
-- **Differential attrition** — Fisher's exact test of (published & measured) vs. not, by arm. p < 0.01 ⇒ flag.
+- **Differential attrition** — among clips that selection *accepted*, Fisher's exact test of (published & measured) vs. not, by arm. This catches, for example, the poster quietly declining to publish one arm's clips. p < 0.01 ⇒ flag.
 - **Differential selection acceptance** — enrolment is at the selection call, so if the question prompt changes how often clips are accepted, the surviving clips are a selected subset. Fisher's exact test of accepted vs. rejected, by arm. p < 0.01 ⇒ flag.
 - **Compliance** — below 80% in either arm ⇒ flag.
 - **Title covariate** — share of titles ending in `?`, by arm, reported.

@@ -185,11 +185,29 @@ def attrition_test(kept: Sequence[int], total: Sequence[int]) -> dict:
 def blinded_pooled_sd(values: Sequence[float]) -> float:
     """SD of the outcome pooled across arms, ignoring which arm each clip is in.
 
-    Used for the pre-registered blinded sample-size re-estimate: it needs no
-    look at the treatment effect, and including any real effect in the pooled
-    spread can only make it slightly larger (a conservative error).
+    Needs no look at the treatment effect. But it is biased UPWARD whenever a
+    real effect exists, because the gap between the arms adds to the spread —
+    see ``blinded_adjusted_sd`` for the version the re-estimate actually uses.
     """
     v = np.asarray(values, float)
     if len(v) < 2:
         raise ValueError("need at least 2 values")
     return float(v.std(ddof=1))
+
+
+def blinded_adjusted_sd(values: Sequence[float], assumed_effect: float) -> float:
+    """Within-arm SD estimated blind to arm, adjusted for the assumed effect.
+
+    With equal arms, the pooled variance is the within-arm variance plus
+    (effect/2)^2 * N/(N-1). Subtracting that for the effect the experiment was
+    powered to detect removes the bias the unadjusted estimate has exactly when
+    the design assumptions hold (the adjusted one-sample variance estimator of
+    Kieser & Friede). Without it, a true effect equal to the MDE would make the
+    re-estimate ask for ~19% more clips even when nothing had gone wrong.
+    """
+    v = np.asarray(values, float)
+    n = len(v)
+    if n < 2:
+        raise ValueError("need at least 2 values")
+    adjusted = v.var(ddof=1) - (assumed_effect**2 / 4) * n / (n - 1)
+    return float(math.sqrt(max(adjusted, 1e-9)))

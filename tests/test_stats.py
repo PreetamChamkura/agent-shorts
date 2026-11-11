@@ -140,3 +140,31 @@ def test_blinded_pooled_sd_ignores_arm_and_needs_two_values():
     assert stats.blinded_pooled_sd([10, 20, 30]) == pytest.approx(10.0)
     with pytest.raises(ValueError):
         stats.blinded_pooled_sd([5])
+
+
+def test_adjusted_blinded_sd_removes_the_bias_a_real_effect_adds():
+    rng = np.random.default_rng(11)
+    sd, effect, n = 12.0, 10.0, 4000
+    values = np.concatenate([rng.normal(50, sd, n), rng.normal(50 + effect, sd, n)])
+    rng.shuffle(values)  # blind: arm labels are not available
+    pooled = stats.blinded_pooled_sd(values)
+    adjusted = stats.blinded_adjusted_sd(values, assumed_effect=effect)
+    assert pooled == pytest.approx(np.hypot(sd, effect / 2), rel=0.02)  # ~13: biased upward
+    assert adjusted == pytest.approx(sd, rel=0.02)  # ~12: bias removed
+
+
+def test_adjusted_blinded_sd_is_conservative_when_there_is_no_effect():
+    rng = np.random.default_rng(12)
+    values = rng.normal(50, 12, 4000)
+    adj = stats.blinded_adjusted_sd(values, assumed_effect=10)
+    assert adj < 12  # under-estimates (never raises n spuriously), by design
+    assert adj == pytest.approx(np.sqrt(144 - 25), rel=0.03)
+
+
+def test_adjusted_blinded_sd_cannot_go_negative_or_nan():
+    assert stats.blinded_adjusted_sd([50.0, 50.1, 49.9], assumed_effect=40) > 0
+
+
+def test_adjusted_blinded_sd_needs_two_values():
+    with pytest.raises(ValueError):
+        stats.blinded_adjusted_sd([5.0], 10)

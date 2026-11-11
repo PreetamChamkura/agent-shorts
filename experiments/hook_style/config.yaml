@@ -28,6 +28,11 @@ design:
   primary_metric: stayed_to_watch_pct
   measurement_age_days: 7
   measurement_window_days: [6, 10]
+  # Power inputs (PREREGISTRATION.md §5). planned_n_per_arm is the rank-test-sized n.
+  mde_points: 10
+  planning_sd: 12
+  alpha: 0.05
+  power: 0.8
   planned_n_per_arm: 26
   max_duration_weeks: 26
   blinded_reestimate_at_n: 16

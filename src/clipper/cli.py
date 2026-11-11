@@ -445,9 +445,19 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
 
+    from .experiment_cli import add_experiment_parser
+
+    add_experiment_parser(sub)
+
     args = parser.parse_args(argv)
 
-    if args.command == "select":
+    if args.command == "experiment":
+        from .experiment_cli import run_experiment
+
+        code = run_experiment(args)
+        if code:
+            sys.exit(code)
+    elif args.command == "select":
         from .select import select
 
         out = select(args.video_id, force=args.force)
