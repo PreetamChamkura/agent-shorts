@@ -1,0 +1,33 @@
+# Feature-flag config for the hook_style experiment. Read by clipper.experiment.
+#
+# status:
+#   preregistered  design is committed; the pipeline IGNORES this file
+#   active         new eligible clips are randomized into an arm (this is "launch")
+#   frozen         no new enrolment; clips already assigned keep their arm
+#
+# Launching = commit this file with status: active and launch_date set. The fields
+# under `design` are hashed into every assignment record (design_sha256), so
+# editing them after launch is detected by `clipper experiment verify`.
+name: hook_style
+status: preregistered
+launch_date: null           # YYYY-MM-DD, set in the commit that flips status to active
+preregistration: PREREGISTRATION.md
+
+design:
+  seed: 20261111
+  block_size: 4             # permuted blocks, 2 of each arm per block
+  control_arm: statement
+  arms:
+    statement:
+      weight: 1
+      hook_style: STATEMENT # the pipeline's existing register (control)
+    question:
+      weight: 1
+      hook_style: QUESTION  # hook line phrased as one direct question ending in "?"
+  eligible_tier: STANDARD   # HIGH tier is disabled pending re-evaluation
+  primary_metric: stayed_to_watch_pct
+  measurement_age_days: 7
+  measurement_window_days: [6, 10]
+  planned_n_per_arm: 26
+  max_duration_weeks: 26
+  blinded_reestimate_at_n: 16
