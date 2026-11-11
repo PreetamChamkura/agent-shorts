@@ -21,6 +21,20 @@ dev = [
     "ruff>=0.6.0",
     "pytest>=8.0",
 ]
+# Only the experiment analysis (clipper.stats, the notebook) needs these; the
+# pipeline itself and the assignment/feature-flag code stay stdlib + pyyaml.
+experiment = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "pandas>=2.2",
+    "matplotlib>=3.9",
+    "nbformat>=5.10",
+    "nbclient>=0.10",
+    "ipykernel>=6.29",
+]
+
+[tool.uv]
+default-groups = ["dev", "experiment"]
 
 [build-system]
 requires = ["hatchling"]
