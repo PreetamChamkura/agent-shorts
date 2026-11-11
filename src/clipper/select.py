@@ -70,6 +70,7 @@ import json
 import logging
 import re
 
+from . import experiment
 from .audience import describe_tier, resolve_audience_tier
 from .paths import PROMPTS_DIR, work_dir
 from .styles import style_for_tone
@@ -202,6 +203,9 @@ _PLACEHOLDERS = (
     # moment inside it is recognizable), so it neither supplies nor
     # references this one.
     "audience_tier",
+    # select_clip.md only. `NONE` unless a pre-registered experiment is active
+    # and has randomized this clip into an arm (see clipper.experiment).
+    "hook_style",
 )
 
 # output_config schema — guarantees the response is valid JSON in this shape,
@@ -1171,6 +1175,7 @@ def select_clip(video_id: str, *, force: bool = False, model: str = SELECT_CLIP_
     dynamic_template, static_prompt = split_cacheable_prompt(template)
     meta = _source_metadata(wd)
     tier, view_count = resolve_audience_tier(wd)
+    enrollment = experiment.enroll(video_id, tier=tier)
 
     import anthropic  # imported lazily so the pure helpers stay import-light
 
@@ -1184,6 +1189,7 @@ def select_clip(video_id: str, *, force: bool = False, model: str = SELECT_CLIP_
         window_end=format_hmmss(clip_duration),
         transcript_window=render_transcript(words),
         audience_tier=describe_tier(tier, view_count),
+        hook_style=experiment.hook_style_label(enrollment),
         **meta,
     )
     log.info(
@@ -1207,6 +1213,9 @@ def select_clip(video_id: str, *, force: bool = False, model: str = SELECT_CLIP_
 
     for n, seg in enumerate(collected):
         seg["n"] = n
+        if enrollment is not None:
+            seg["experiment"] = enrollment.as_dict()
+    experiment.record_selection(enrollment, video_id, collected[0] if collected else None)
 
     out = {"video_id": video_id, "segments": collected}
     segments_path.write_text(json.dumps(out, indent=2))
@@ -1243,15 +1252,22 @@ def _strip_wrapper_output_example(static_prompt: str) -> tuple[str, str]:
     return before_output, field_rules_onward
 
 
-def _render_candidate_block(index: int, total: int, video_id: str) -> tuple[str, dict, float]:
+def _render_candidate_block(
+    index: int, total: int, video_id: str
+) -> tuple[str, list[dict], float, experiment.Enrollment | None]:
     """One "### Candidate N of M" block for select_clip_batch's user turn,
     reusing select_clip.md's own per-clip dynamic template — the exact same
     Source/transcript rendering a single-clip call would use, just labeled
     and concatenated instead of sent alone.
 
-    Returns (rendered_block, words, clip_duration). Raises FileNotFoundError
-    if this video hasn't been transcribed — same precondition select_clip
-    enforces for a single clip.
+    Returns (rendered_block, words, clip_duration, enrollment). Raises
+    FileNotFoundError if this video hasn't been transcribed — same precondition
+    select_clip enforces for a single clip.
+
+    A clip under MIN_DURATION is rejected by the caller without a model call,
+    so it is NOT enrolled in an experiment here (it would burn an assignment
+    slot for a clip that never receives a treatment); its block is rendered
+    with the no-experiment value and discarded.
     """
     wd = work_dir(video_id)
     words_path = wd / "words.json"
@@ -1269,6 +1285,9 @@ def _render_candidate_block(index: int, total: int, video_id: str) -> tuple[str,
     dynamic_template, _ = split_cacheable_prompt(template)
     meta = _source_metadata(wd)
     tier, view_count = resolve_audience_tier(wd)
+    enrollment = (
+        experiment.enroll(video_id, tier=tier) if clip_duration >= MIN_DURATION else None
+    )
 
     block = render_prompt(
         dynamic_template,
@@ -1278,10 +1297,11 @@ def _render_candidate_block(index: int, total: int, video_id: str) -> tuple[str,
         window_end=format_hmmss(clip_duration),
         transcript_window=render_transcript(words),
         audience_tier=describe_tier(tier, view_count),
+        hook_style=experiment.hook_style_label(enrollment),
         **meta,
     )
     header = f"### Candidate {index} of {total}\n\n"
-    return header + block, words, clip_duration
+    return header + block, words, clip_duration, enrollment
 
 
 def select_clip_batch(
@@ -1333,10 +1353,11 @@ def select_clip_batch(
 
     blocks: list[str] = []
     words_by_id: dict[str, list[dict]] = {}
+    enrollment_by_id: dict[str, experiment.Enrollment | None] = {}
     below_floor: list[str] = []
     total = len(to_call)
     for i, video_id in enumerate(to_call, start=1):
-        block, words, clip_duration = _render_candidate_block(i, total, video_id)
+        block, words, clip_duration, enrollment = _render_candidate_block(i, total, video_id)
         if clip_duration < MIN_DURATION:
             log.warning(
                 "select_clip_batch: %s is %.1fs, under the %.0fs floor — nothing to trim up to, "
@@ -1349,6 +1370,7 @@ def select_clip_batch(
             continue
         blocks.append(block)
         words_by_id[video_id] = words
+        enrollment_by_id[video_id] = enrollment
 
     # Below-floor candidates never got a rendered block above and are
     # rejected the same way select_clip rejects them: no model call spent.
@@ -1420,8 +1442,12 @@ def select_clip_batch(
             seg = validate_segment(raw, words)
             if seg is not None:
                 collected.append(seg)
+        enrollment = enrollment_by_id.get(video_id)
         for n, seg in enumerate(collected):
             seg["n"] = n
+            if enrollment is not None:
+                seg["experiment"] = enrollment.as_dict()
+        experiment.record_selection(enrollment, video_id, collected[0] if collected else None)
 
         out = {"video_id": video_id, "segments": collected}
         (work_dir(video_id) / "segments.json").write_text(json.dumps(out, indent=2))

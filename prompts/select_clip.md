@@ -7,6 +7,7 @@ Clip title: {video_title}
 Created: {upload_date}
 Description: {video_description_first_500_chars}
 Audience tier: {audience_tier}
+Hook style: {hook_style}
 
 ## Clip transcript
 
@@ -50,6 +51,24 @@ What does not relax on HIGH — these are mechanical or structural, and recognit
 - The 18-58 second range and every trimming rule in Task below.
 - `why` still has to name at least two real timestamps. On this tier you are locating the one moment rather than proving a full arc — "clip opens at 0.0 mid-argument, the moment it turns lands at 14.0" is a perfectly good `why` — but it still has to point at real times in this transcript. A `why` with fewer than two timestamps is discarded mechanically, on either tier.
 - `confidence` is still your own honest read, scored against this tier's own bar. Do not inflate it because the clip is popular — the view count already did its job by setting the tier, and counting it twice just pushes weak picks through. A moment you genuinely think lands is a high-confidence HIGH-tier pick; one that would bore even the people who recognize it is a low one, and low ones are still meant to be rejected.
+
+## Hook style (controlled experiment)
+
+The Source block's `Hook style` line (in a batch, each candidate has its own) is one of `NONE`, `STATEMENT`, or `QUESTION`.
+
+**NONE** — no experiment is running. Ignore this whole section; every rule in this prompt applies exactly as written.
+
+**STATEMENT** and **QUESTION** are the two arms of a randomized test of how the narrator's *hook line* is phrased. The arm was assigned at random before you saw this clip. It is not a judgment about the clip, so do not second-guess it, do not pick the style you think fits better, and do not mention it anywhere in the output — each of those would corrupt the test.
+
+The hook line is `vo_script` for `cold_open` and `pre_punchline`, and `on_screen_caption` for `caption_only`. In both arms:
+
+- **The hook line is required.** Write one; do not return null for it. If you cannot honestly write one for this clip, return no segment for it (`"segments": []`) rather than a segment with a null line.
+- Every other rule applies unchanged: find the angle first, one beat, the 2-6 word target, present tense, no describing what is visible, no hype, and never give away the payoff.
+- Everything else — `caption_title`, `suggested_title`, `thumbnail_text`, tone, timing, mode — is written exactly as it would be with Hook style `NONE`. Do not let the arm leak into other fields; in particular, do not make the title a question or a statement because of it.
+
+**STATEMENT** — the hook line is a statement and contains no question mark. This is the register the rest of this prompt already describes.
+
+**QUESTION** — the hook line is one direct question about this moment and ends with `?`. This is the single deliberate exception to the rule against questions to the audience, and it covers the hook line only. It still points at the payoff without answering it, and it has to be a real question, not a statement with a question mark added. "Recorded three weeks before it happened." as a statement becomes "Recorded three weeks before what?" as a question — same angle, same restraint.
 
 ## Task
 
@@ -178,7 +197,8 @@ not actually made the choice yet.
 `on_screen_caption` obeys every rule `vo_script` does: find the angle first, one
 beat not two, the 2-6 word target above (read instead of heard is not a reason
 to run longer — same target, not a looser 8-20), present tense, never
-describing what is visible, no hype, no questions to the audience. A line that
+describing what is visible, no hype, no questions to the audience (the one exception is
+a QUESTION-arm hook line — see Hook style above). A line that
 fails the bar is not rescued by being displayed instead of spoken. If there is
 nothing worth saying, both fields are null and the clip runs unframed — a
 correct answer, not a failure.
